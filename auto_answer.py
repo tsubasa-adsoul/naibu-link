@@ -1,19 +1,17 @@
-# Streamlit版（完成版）
-
-```python
 # streamlit_app.py
 # ------------------------------------------------------------
-# 🔗 answer-genkinka.jp専用内部リンク分析ツール（Streamlit・実クロール版）
-# - 既存Tk/CTk版のロジックをStreamlitに移植
-# - ダミーなし。実際にrequests+BeautifulSoupでクロールします
-# - 収集上限: 500記事 / 自動で /blog/page/2/ も巡回
-# - 分析完了後：画面表示 + 詳細CSVのダウンロード + 自動保存（任意）
+# 🔗 answer-genkinka.jp専用 内部リンク分析（Streamlit・実クロール完全版）
+# - 既存CTk版の移植 + 不具合修正
+# - 個別記事判定を強化（/blog/<slug>、/YYYY/MM/<slug>、/直下スラッグ）
+# - ページネーション自動探索（rel=next, .pagination）
+# - sitemap.xml もシードに追加（/blog/配下優先）
+# - ダミー/サンプル一切なし
 # ------------------------------------------------------------
 
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, urljoin
+from bs4 import BeautifulSoup, SoupStrainer
+from urllib.parse import urlparse, urljoin, urlunparse
 from datetime import datetime
 import re
 import csv
@@ -21,402 +19,411 @@ import io
 import os
 import sys
 import time
+from collections import deque
 
-st.set_page_config(page_title="answer-genkinka.jp 内部リンク分析（Streamlit）", layout="wide")
+st.set_page_config(page_title="answer-genkinka.jp 内部リンク分析", layout="wide")
 
-# =========================
-# ユーティリティ
-# =========================
+DOMAIN = "answer-genkinka.jp"
+BASE = f"https://{DOMAIN}"
+
+# ===== ユーティリティ =====
 def normalize_url(url: str) -> str:
     if not url:
         return ""
     try:
-        parsed = urlparse(url)
-        return f"https://{parsed.netloc.replace('www.', '')}{parsed.path.rstrip('/')}"
+        p = urlparse(url)
+        # www除去・クエリ/フラグメント除去・末尾スラッシュ除去
+        clean = urlunparse(("https", p.netloc.replace("www.", ""), p.path.rstrip("/"), "", "", ""))
+        return clean
     except Exception:
         return url
 
-def is_article_page(url: str) -> bool:
-    """個別記事ページかどうか判定（シンプル版/Tk版準拠）"""
-    path = urlparse(normalize_url(url)).path.lower()
-
-    # 除外：明らかに記事ではないもの
-    exclude_words = ['/site/', '/blog/', '/page/', '/feed', '/wp-', '.']
-    if any(word in path for word in exclude_words):
+def same_site(url: str) -> bool:
+    try:
+        return urlparse(url).netloc.replace("www.", "") == DOMAIN
+    except Exception:
         return False
 
-    # 許可：ルート直下のスラッグ（/記事名）
-    if path.startswith('/') and len(path) > 1:
-        clean_path = path[1:].rstrip('/')
-        if clean_path and '/' not in clean_path:
-            return True
+# 個別記事パターン:
+ARTICLE_PATTERNS = [
+    re.compile(r"^/blog/[^/]+/?$", re.IGNORECASE),            # /blog/slug
+    re.compile(r"^/\d{4}/\d{1,2}/[^/]+/?$", re.IGNORECASE),   # /2025/09/slug
+    re.compile(r"^/[^/]+/?$", re.IGNORECASE),                 # /slug（ルート直下）
+]
 
-    return False
+def is_article_page(url: str) -> bool:
+    path = urlparse(normalize_url(url)).path
+    # 除外拡張子/ディレクトリ
+    if any(path.endswith(ext) for ext in (".jpg",".jpeg",".png",".gif",".webp",".svg",".pdf",".css",".js",".zip",".rar",".7z",".mp4",".mp3",".webm",".ico")):
+        return False
+    if any(seg in path.lower() for seg in ["/wp-admin","/wp-json","/feed","/page/","/tag/","/category/","/author/","/site/","/search"]):
+        return False
+    # 個別記事パターンのいずれかに一致
+    return any(pat.match(path) for pat in ARTICLE_PATTERNS)
 
 def is_crawlable(url: str) -> bool:
-    """クロール対象かどうか判定"""
     path = urlparse(normalize_url(url)).path.lower()
-
-    # 除外：明らかに不要なもの
-    exclude_words = ['/site/', '/wp-admin', '/feed', '.jpg', '.png', '.css', '.js']
-    if any(word in path for word in exclude_words):
+    if any(path.endswith(ext) for ext in (".jpg",".jpeg",".png",".gif",".webp",".svg",".pdf",".css",".js",".zip",".rar",".7z",".mp4",".mp3",".webm",".ico")):
         return False
+    if any(bad in path for bad in ["/wp-admin","/wp-login","/feed","/tag/","/author/","/site/","/search"]):
+        return False
+    # /blog 一覧や記事、年/月アーカイブなどは許容
+    return True
 
-    # 許可：ブログ関連 + 記事ページ
-    return (path.startswith('/blog') or is_article_page(url))
+def get_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
+    })
+    return s
 
-def extract_links(soup: BeautifulSoup, current_url: str) -> list[str]:
-    """リンク抽出（サイト内 & クロール対象のみ）"""
-    links = []
-    for a in soup.find_all('a', href=True):
-        href = a.get('href', '').strip()
-        if href and not href.startswith('#'):
-            absolute = urljoin(current_url, href)
-            if 'answer-genkinka.jp' in absolute and is_crawlable(absolute):
-                links.append(normalize_url(absolute))
-    return list(set(links))
+def fetch(session, url, timeout=12, retries=2, sleep=0.6):
+    last_exc = None
+    for i in range(retries+1):
+        try:
+            r = session.get(url, timeout=timeout)
+            # 2xxのみ採用
+            if 200 <= r.status_code < 300:
+                return r
+            # 429/5xx →待って再試行
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(sleep * (i+1))
+            else:
+                return r  # 404等はそのまま返す
+        except Exception as e:
+            last_exc = e
+            time.sleep(sleep * (i+1))
+    if last_exc:
+        raise last_exc
+    return None
 
-def extract_content_links(soup: BeautifulSoup, current_url: str) -> list[dict]:
-    """コンテンツエリアからリンク抽出（本文内リンクのみ）"""
-    content = soup.select_one('.entry-content, .post-content, main, article')
+CONTENT_SELECTORS = [
+    ".entry-content",
+    ".post-content",
+    "article .entry-content",
+    "article .content",
+    ".single-post",
+    ".p-entry__body",
+    ".c-entry__content",
+    ".article-body",
+    "main article",
+    "main .content",
+    "#content article",
+    "article",
+    "main",
+]
+
+def extract_content_links(soup: BeautifulSoup, current_url: str):
+    # 本文に近い領域を優先
+    content = None
+    for sel in CONTENT_SELECTORS:
+        content = soup.select_one(sel)
+        if content:
+            break
     if not content:
         return []
 
-    links = []
-    for a in content.find_all('a', href=True):
-        href = a.get('href', '').strip()
-        text = a.get_text(strip=True) or ''
-        if href and not href.startswith('#') and text:
-            absolute = urljoin(current_url, href)
-            if 'answer-genkinka.jp' in absolute and is_article_page(absolute):
-                links.append({'url': normalize_url(absolute), 'anchor_text': text[:100]})
-    return links
+    out = []
+    for a in content.find_all("a", href=True):
+        href = a.get("href","").strip()
+        text = (a.get_text(strip=True) or "").strip()
+        if not href or href.startswith("#") or not text:
+            continue
+        absu = urljoin(current_url, href)
+        if same_site(absu) and is_article_page(absu):
+            out.append({"url": normalize_url(absu), "anchor_text": text[:120]})
+    # 重複排除（URL+anchor）
+    seen = set()
+    uniq = []
+    for d in out:
+        key = (d["url"], d["anchor_text"])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(d)
+    return uniq
 
 def sanitize_title(title: str, url: str) -> str:
-    """サイト名などを除去"""
     if not title:
         return url
-    # 「answer-genkinka | アンサー」等のサイト名除去
-    return re.sub(r'\s*[|\-]\s*.*(answer-genkinka|アンサー).*$', '', title, flags=re.IGNORECASE)
+    return re.sub(r"\s*[|\-]\s*.*(answer-genkinka|アンサー).*?$","", title, flags=re.IGNORECASE)
 
-# =========================
-# 分析本体
-# =========================
-def analyze_site(start_url: str, max_pages: int = 500, status_cb=None, progress_cb=None):
-    """
-    - start_url から巡回し、/blog/page/2/ もキューに追加
-    - 記事ページの被/発リンクを抽出
-    - return: pages(dict), links(list[tuple]), detailed_links(list[dict])
-    """
-    pages = {}
+def collect_links_on_page(soup: BeautifulSoup, current_url: str):
     links = []
-    detailed_links = []
+    for a in soup.find_all("a", href=True):
+        href = a.get("href","").strip()
+        if not href or href.startswith("#"):
+            continue
+        absu = urljoin(current_url, href)
+        if same_site(absu) and is_crawlable(absu):
+            links.append(normalize_url(absu))
+    return list(dict.fromkeys(links))  # 順序保持で重複除去
+
+def find_pagination_urls(soup: BeautifulSoup, current_url: str):
+    """rel=next, .pagination, .nav-links から次ページを探索"""
+    urls = set()
+    for ln in soup.find_all("link", rel=lambda x: x and "next" in x):
+        absu = urljoin(current_url, ln.get("href",""))
+        if same_site(absu):
+            urls.add(normalize_url(absu))
+    for a in soup.select("a[rel='next'], .pagination a, .nav-links a"):
+        absu = urljoin(current_url, a.get("href",""))
+        if same_site(absu):
+            urls.add(normalize_url(absu))
+    return list(urls)
+
+def seed_from_sitemap(session):
+    """sitemap.xml から /blog/配下や記事っぽいURLをシードに追加"""
+    seeds = set()
+    for path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap1.xml"]:
+        url = BASE + path
+        try:
+            r = fetch(session, url, timeout=10, retries=1)
+            if not r or r.status_code != 200 or "xml" not in r.headers.get("Content-Type",""):
+                continue
+            # 軽量パース
+            only_loc = SoupStrainer("loc")
+            xsoup = BeautifulSoup(r.text, "xml", parse_only=only_loc)
+            for loc in xsoup.find_all("loc"):
+                locu = (loc.text or "").strip()
+                if not locu:
+                    continue
+                if same_site(locu):
+                    nloc = normalize_url(locu)
+                    # /blog/配下 or 記事判定に合致
+                    if "/blog/" in urlparse(nloc).path or is_article_page(nloc):
+                        seeds.add(nloc)
+        except Exception:
+            continue
+    return list(seeds)
+
+# ===== 分析本体 =====
+def analyze_site(start_url: str, max_pages: int, status_cb=None, progress_cb=None):
+    pages = {}           # url -> {title, outbound_links[], inbound_links}
+    links = []           # (source, target)
+    detailed_links = []  # dict
+
+    start_url = normalize_url(start_url)
+    session = get_session()
 
     visited = set()
-    to_visit = [normalize_url(start_url)]
-    # ページネーションも巡回
-    to_visit.append('https://answer-genkinka.jp/blog/page/2/')
+    q = deque()
 
-    session = requests.Session()
-    session.headers.update({'User-Agent': 'Mozilla/5.0'})
+    # 初期キュー：入力URL + ページネーション（後で自動検出） + sitemap
+    q.append(start_url)
+    # sitemapから種まき
+    for u in seed_from_sitemap(session)[:1000]:
+        q.append(u)
 
-    if status_cb:
-        status_cb("収集中: 0記事")
+    processed_count = 0
 
-    # ===== フェーズ1: ページ収集 =====
-    while to_visit and len(pages) < max_pages:
-        url = to_visit.pop(0)
-        if url in visited:
+    # フェーズ1：収集（一覧/記事問わず拾い、記事はpagesに登録）
+    while q and len(pages) < max_pages:
+        url = q.popleft()
+        if url in visited or not same_site(url):
             continue
+        visited.add(url)
 
         try:
-            resp = session.get(url, timeout=10)
-            if resp.status_code != 200:
-                visited.add(url)
+            r = fetch(session, url, timeout=12, retries=2)
+            if not r or r.status_code != 200:
                 continue
 
-            soup = BeautifulSoup(resp.text, 'html.parser')
+            soup = BeautifulSoup(r.text, "html.parser")
 
-            # NOINDEXチェック
-            robots = soup.find('meta', attrs={'name': 'robots'})
-            if robots and 'noindex' in robots.get('content', '').lower():
-                visited.add(url)
+            # robots noindex 回避
+            robots = soup.find("meta", attrs={"name":"robots"})
+            if robots and "noindex" in (robots.get("content","").lower()):
                 continue
 
-            # 記事一覧ページは収集のみ
-            if '/blog' in url:
-                page_links = extract_links(soup, url)
-                new_links = [l for l in page_links if l not in visited and l not in to_visit]
-                to_visit.extend(new_links)
-                visited.add(url)
-                if status_cb:
-                    status_cb(f"収集中: {len(pages)}記事（一覧: 新規{len(new_links)}件）")
-                if progress_cb:
-                    progress_cb(len(pages) / max_pages)
-                time.sleep(0.05)
-                continue
-
-            # 個別記事
+            # 記事なら登録
             if is_article_page(url):
-                title_el = soup.find('h1')
-                title = sanitize_title(title_el.get_text(strip=True) if title_el else url, url)
+                h1 = soup.find("h1")
+                title = sanitize_title(h1.get_text(strip=True) if h1 else url, url)
+                if url not in pages:
+                    pages[url] = {"title": title, "outbound_links": [], "inbound_links": 0}
 
-                pages[url] = {'title': title, 'outbound_links': []}
+            # そのページから見つかるリンクを収集（一覧・記事を問わずクロール拡大）
+            new_links = collect_links_on_page(soup, url)
+            # ページネーションも収集
+            new_links += find_pagination_urls(soup, url)
+            # キューに追加（未訪問のみ）
+            for nl in new_links:
+                if nl not in visited and same_site(nl):
+                    q.append(nl)
 
-                # 新規リンク発見
-                page_links = extract_links(soup, url)
-                new_links = [l for l in page_links if l not in visited and l not in to_visit]
-                to_visit.extend(new_links)
-
-            visited.add(url)
-
+            processed_count += 1
             if status_cb:
-                status_cb(f"収集中: {len(pages)}記事")
+                status_cb(f"収集中: 記事 {len(pages)} / キュー {len(q)} / 処理 {processed_count}")
             if progress_cb:
-                progress_cb(len(pages) / max_pages)
-            time.sleep(0.05)
+                # 記事の進捗ベース（最大値max_pagesに対する比率）
+                progress_cb(min(len(pages)/max_pages, 0.98))
+            time.sleep(0.03)
 
         except Exception:
-            # 失敗はスキップ
-            visited.add(url)
             continue
 
-    # ===== フェーズ2: リンク関係構築 =====
-    processed = set()
+    # フェーズ2：本文内リンク構築（記事のみを対象に本文を再解析）
     for url in list(pages.keys()):
         try:
-            resp = session.get(url, timeout=10)
-            if resp.status_code != 200:
+            r = fetch(session, url, timeout=12, retries=2)
+            if not r or r.status_code != 200:
                 continue
-
-            soup = BeautifulSoup(resp.text, 'html.parser')
+            soup = BeautifulSoup(r.text, "html.parser")
             content_links = extract_content_links(soup, url)
-
-            for link_data in content_links:
-                target = link_data['url']
-                if target in pages and target != url:
-                    link_key = (url, target)
-                    if link_key not in processed:
-                        processed.add(link_key)
-                        links.append((url, target))
-                        pages[url]['outbound_links'].append(target)
-                        detailed_links.append({
-                            'source_url': url,
-                            'source_title': pages[url]['title'],
-                            'target_url': target,
-                            'anchor_text': link_data['anchor_text']
-                        })
+            for ld in content_links:
+                tgt = ld["url"]
+                if tgt in pages and tgt != url:
+                    links.append((url, tgt))
+                    pages[url]["outbound_links"].append(tgt)
+                    detailed_links.append({
+                        "source_url": url,
+                        "source_title": pages[url]["title"],
+                        "target_url": tgt,
+                        "anchor_text": ld["anchor_text"],
+                    })
+            if status_cb:
+                status_cb(f"リンク解析中: {pages[url]['title'][:28]}…")
+            time.sleep(0.02)
         except Exception:
             continue
 
-    # 被リンク数計算
+    # 被リンク数
     for u in pages:
-        pages[u]['inbound_links'] = sum(1 for s, t in links if t == u)
+        pages[u]["inbound_links"] = sum(1 for s,t in links if t == u)
+
+    if progress_cb:
+        progress_cb(1.0)
 
     return pages, links, detailed_links
 
-# =========================
-# CSV出力
-# =========================
+# ===== CSV =====
 def build_csv_bytes(pages: dict, detailed_links: list[dict]) -> bytes:
-    """
-    画面ダウンロード用（UTF-8 BOM）
-    """
     buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(['番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'])
+    w = csv.writer(buf)
+    w.writerow(["番号","ページタイトル","URL","被リンク元タイトル","被リンク元URL","アンカーテキスト"])
 
-    # ターゲット別にグループ化
     targets = {}
-    for link in detailed_links:
-        target = link['target_url']
-        targets.setdefault(target, []).append(link)
+    for d in detailed_links:
+        targets.setdefault(d["target_url"], []).append(d)
 
-    # 被リンク数でソート
-    sorted_targets = sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)
+    for i, (tgt, lst) in enumerate(sorted(targets.items(), key=lambda x: len(x[1]), reverse=True), start=1):
+        ttitle = pages.get(tgt,{}).get("title", tgt)
+        for d in lst:
+            w.writerow([i, ttitle, tgt, d["source_title"], d["source_url"], d["anchor_text"]])
 
-    row = 1
-    for target, links_list in sorted_targets:
-        title = pages.get(target, {}).get('title', target)
-        for link in links_list:
-            writer.writerow([row, title, target, link['source_title'], link['source_url'], link['anchor_text']])
+    # 孤立ページ
+    row = len(detailed_links) + 1
+    for u, info in pages.items():
+        if info.get("inbound_links",0) == 0:
+            w.writerow([row, info.get("title",u), u, "", "", ""])
             row += 1
 
-    # 孤立ページも追加
-    for url, info in pages.items():
-        if info.get('inbound_links', 0) == 0:
-            writer.writerow([row, info.get('title', url), url, '', '', ''])
-            row += 1
-
-    data = buf.getvalue().encode('utf-8-sig')
+    data = buf.getvalue().encode("utf-8-sig")
     buf.close()
     return data
 
-def auto_save_csv_to_disk(pages: dict, detailed_links: list[dict]) -> str | None:
-    """
-    ローカル/サーバーに日付フォルダで自動保存（任意）
-    """
+def auto_save_csv(pages: dict, detailed_links: list[dict]) -> str | None:
     try:
-        # 実行ファイル基準（PyInstaller対応）
-        if hasattr(sys, '_MEIPASS'):
+        if hasattr(sys, "_MEIPASS"):
             base_dir = os.path.dirname(sys.executable)
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
-
-        today = datetime.now().strftime("%Y-%m-%d")
-        folder_path = os.path.join(base_dir, today)
-        os.makedirs(folder_path, exist_ok=True)
-
-        filename = f"answer-genkinka-{today}.csv"
-        filepath = os.path.join(folder_path, filename)
-
-        with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.writer(f)
-            writer.writerow(['番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'])
-
-            targets = {}
-            for link in detailed_links:
-                target = link['target_url']
-                targets.setdefault(target, []).append(link)
-
-            sorted_targets = sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)
-            row = 1
-            for target, links_list in sorted_targets:
-                title = pages.get(target, {}).get('title', target)
-                for link in links_list:
-                    writer.writerow([row, title, target, link['source_title'], link['source_url'], link['anchor_text']])
-                    row += 1
-
-            for url, info in pages.items():
-                if info.get('inbound_links', 0) == 0:
-                    writer.writerow([row, info.get('title', url), url, '', '', ''])
-                    row += 1
-
-        return filepath
+        d = datetime.now().strftime("%Y-%m-%d")
+        folder = os.path.join(base_dir, d)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"answer-genkinka-{d}.csv")
+        with open(path, "wb") as f:
+            f.write(build_csv_bytes(pages, detailed_links))
+        return path
     except Exception:
         return None
 
-# =========================
-# UI / 実行
-# =========================
-DEFAULT_URL = "https://answer-genkinka.jp/blog/"
+# ===== UI =====
+st.title("🔗 answer-genkinka.jp 内部リンク分析（Streamlit・実クロール）")
 
-st.title("🔗 answer-genkinka.jp専用内部リンク分析ツール（Streamlit・全自動版）")
-
-col_url, col_opts = st.columns([0.7, 0.3])
-with col_url:
-    start_url = st.text_input("開始URL", value=DEFAULT_URL, help="例: https://answer-genkinka.jp/blog/")
-
-with col_opts:
-    max_pages = st.number_input("収集上限（記事）", min_value=50, max_value=2000, value=500, step=50)
-    do_autosave = st.checkbox("分析完了後に自動保存（実行環境にCSV出力）", value=True)
-
-# 自動実行（初回のみ）
-if "auto_run_done" not in st.session_state:
-    st.session_state.auto_run_done = False
-
-run_now = False
-c1, c2 = st.columns([0.3, 0.7])
-with c1:
-    if st.button("分析開始", type="primary"):
-        run_now = True
-with c2:
-    st.write(" ")
-
-if not st.session_state.auto_run_done and start_url.strip():
-    run_now = True
-    st.session_state.auto_run_done = True
+col1, col2 = st.columns([0.7, 0.3])
+with col1:
+    start_url = st.text_input("開始URL", value=f"{BASE}/blog/", help="例: https://answer-genkinka.jp/blog/")
+with col2:
+    max_pages = st.number_input("記事収集上限", 50, 5000, 800, 50)
+    do_autosave = st.checkbox("完了後に自動保存（CSV）", value=True)
 
 status = st.empty()
-progress = st.progress(0)
+prog = st.progress(0.0)
 
-def status_cb(msg: str):
-    status.info(msg)
+def status_cb(msg): status.info(msg)
+def progress_cb(v): prog.progress(min(max(v,0.0),1.0))
 
-def progress_cb(val: float):
-    progress.progress(min(max(val, 0.0), 1.0))
+run = st.button("分析開始", type="primary")
 
-if run_now:
+# 初回自動実行
+if "auto_done" not in st.session_state:
+    st.session_state.auto_done = False
+if not st.session_state.auto_done and start_url.strip():
+    run = True
+    st.session_state.auto_done = True
+
+if run:
     try:
-        status_cb("準備中…")
-        pages, links, detailed_links = analyze_site(start_url, int(max_pages), status_cb=status_cb, progress_cb=progress_cb)
-
+        status_cb("開始します…")
+        pages, links, detailed = analyze_site(start_url=start_url, max_pages=int(max_pages),
+                                              status_cb=status_cb, progress_cb=progress_cb)
         total = len(pages)
-        isolated = sum(1 for p in pages.values() if p.get('inbound_links', 0) == 0)
-        popular5 = sum(1 for p in pages.values() if p.get('inbound_links', 0) >= 5)
-        st.success(f"分析完了: {total}記事 / {len(links)}リンク / 孤立{isolated}件 / 人気(5+) {popular5}件")
+        isolated = sum(1 for p in pages.values() if p.get("inbound_links",0) == 0)
+        popular5 = sum(1 for p in pages.values() if p.get("inbound_links",0) >= 5)
+        st.success(f"分析完了: 記事 {total} / リンク {len(links)} / 孤立 {isolated} / 人気(5+) {popular5}")
 
-        # 結果テーブル
-        sorted_pages = sorted(pages.items(), key=lambda x: x[1].get('inbound_links', 0), reverse=True)
-
-        # 左: サマリ / 右: リスト
         left, right = st.columns([0.35, 0.65])
         with left:
             st.subheader("サマリ")
             st.metric("記事数", total)
             st.metric("リンク数", len(links))
-            st.metric("孤立ページ", isolated)
-            st.metric("人気(被10+)", sum(1 for p in pages.values() if p.get('inbound_links', 0) >= 10))
+            st.metric("孤立", isolated)
+            st.metric("人気(被10+)", sum(1 for p in pages.values() if p.get("inbound_links",0) >= 10))
 
-            # CSVダウンロード
-            csv_bytes = build_csv_bytes(pages, detailed_links)
+            csv_bytes = build_csv_bytes(pages, detailed)
             st.download_button(
-                label="詳細CSVをダウンロード",
+                "詳細CSVをダウンロード",
                 data=csv_bytes,
                 file_name=f"answer-genkinka-{datetime.now().strftime('%Y-%m-%d')}.csv",
-                mime="text/csv"
+                mime="text/csv",
             )
-
-            # 自動保存
-            saved_path = None
             if do_autosave:
-                saved_path = auto_save_csv_to_disk(pages, detailed_links)
-            if saved_path:
-                st.caption(f"自動保存: {saved_path}")
+                pth = auto_save_csv(pages, detailed)
+                if pth:
+                    st.caption(f"自動保存: {pth}")
 
         with right:
             st.subheader("記事ランキング（被リンク降順）")
-            for i, (u, info) in enumerate(sorted_pages, start=1):
-                inbound = info.get('inbound_links', 0)
-                outbound = len(info.get('outbound_links', []))
-
-                if inbound == 0:
-                    eval_text = "🚨要改善"
-                elif inbound >= 10:
-                    eval_text = "🏆超人気"
-                elif inbound >= 5:
-                    eval_text = "✅人気"
-                else:
-                    eval_text = "⚠️普通"
-
+            for i, (u, info) in enumerate(sorted(pages.items(), key=lambda x: x[1].get("inbound_links",0), reverse=True), start=1):
+                inbound = info.get("inbound_links",0)
+                outbound = len(info.get("outbound_links",[]))
+                if inbound == 0: tag = "🚨要改善"
+                elif inbound >= 10: tag = "🏆超人気"
+                elif inbound >= 5: tag = "✅人気"
+                else: tag = "⚠️普通"
                 st.markdown(
-                    f"**{i}. {info.get('title','')[:50]}...**  \n"
-                    f"被リンク: **{inbound}** / 発リンク: {outbound} / {eval_text}  \n"
+                    f"**{i}. {info.get('title','')[:60]}**  \n"
+                    f"被リンク: **{inbound}** / 発リンク: {outbound} / {tag}  \n"
                     f"[{u}]({u})"
                 )
+
+        with st.expander("本文内リンク（ターゲット別 詳細）", expanded=False):
+            targets = {}
+            for d in detailed:
+                targets.setdefault(d["target_url"], []).append(d)
+            for tgt, lst in sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)[:300]:
+                st.markdown(f"**{pages.get(tgt,{}).get('title',tgt)}**  \n[{tgt}]({tgt})  \n被リンク: **{len(lst)}**")
+                for dd in lst[:80]:
+                    st.markdown(f"- from: [{dd['source_title']}]({dd['source_url']})  \n  アンカー: `{dd['anchor_text']}`")
+                st.divider()
 
         status_cb("完了")
         progress_cb(1.0)
 
-        # 詳細リンクのプレビュー
-        with st.expander("本文内リンク（詳細・ターゲット別）"):
-            # ターゲット別にグループ化
-            targets = {}
-            for link in detailed_links:
-                targets.setdefault(link['target_url'], []).append(link)
-            sorted_targets = sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)
-
-            for tgt, lst in sorted_targets[:200]:  # 表示過多防止で最大200ターゲット
-                st.markdown(f"**{pages.get(tgt,{}).get('title',tgt)}**  \n[{tgt}]({tgt})  \n被リンク: **{len(lst)}**")
-                for lk in lst[:50]:  # ターゲットごと最大50件表示
-                    st.markdown(
-                        f"- from: [{lk['source_title']}]({lk['source_url']})  \n"
-                        f"  アンカー: `{lk['anchor_text']}`"
-                    )
-                st.divider()
-
     except Exception as e:
         st.error(f"分析エラー: {e}")
 else:
-    st.info("「分析開始」を押すか、ページ表示直後の自動実行をお待ちください。")
-```
+    st.info("「分析開始」を押すか、ページ表示直後の自動実行でクロールを開始します。")
