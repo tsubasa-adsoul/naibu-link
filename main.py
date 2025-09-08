@@ -534,6 +534,11 @@ def show_dashboard():
                 # アクションボタン
                 if st.button(f"🚀 {config['name']} 分析実行", key=f"analyze_{site_key}"):
                     run_analysis(site_key, config)
+                
+                # 保存された結果があれば表示ボタンを追加
+                if f'pages_{site_key}' in st.session_state:
+                    if st.button(f"📊 {config['name']} 結果表示", key=f"show_{site_key}"):
+                        show_analysis_results(site_key)
 
 def show_individual_analysis():
     """個別分析画面"""
