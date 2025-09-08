@@ -253,12 +253,28 @@ def main():
     
     analyzer = AnswerGenkinkaAnalyzer()
     
+    # デバッグ：基本接続テスト
+    if st.button("🔍 接続テスト"):
+        try:
+            response = requests.get("https://answer-genkinka.jp/blog/", timeout=10)
+            st.write(f"ステータス: {response.status_code}")
+            st.write(f"タイトル取得: {response.text[:300]}")
+        except Exception as e:
+            st.error(f"接続エラー: {e}")
+    
     # 分析実行
     if st.button("🚀 分析開始", type="primary"):
         
         # 実際の分析実行
         with st.spinner("分析中..."):
             data = analyzer.analyze_site()
+        
+        # デバッグ：取得データを表示
+        st.write(f"取得データ数: {len(data) if data else 0}")
+        if data:
+            st.write("最初の3件のデータ:")
+            for i, item in enumerate(data[:3]):
+                st.write(f"{i+1}. {item}")
         
         if data:
             # 被リンク数でソート
