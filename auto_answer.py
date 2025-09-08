@@ -16,7 +16,8 @@ class AnswerAnalyzer:
         self.detailed_links = []
 
     def normalize_url(self, url):
-        if not url: return ""
+        if not url: 
+            return ""
         try:
             parsed = urlparse(url)
             return f"https://{parsed.netloc.replace('www.', '')}{parsed.path.rstrip('/')}"
@@ -24,38 +25,29 @@ class AnswerAnalyzer:
             return url
 
     def is_article_page(self, url):
-        """個別記事ページかどうか判定（シンプル版）"""
         path = urlparse(self.normalize_url(url)).path.lower()
         
-        # 除外：明らかに記事ではないもの
         exclude_words = ['/site/', '/blog/', '/page/', '/feed', '/wp-', '.']
         if any(word in path for word in exclude_words):
             return False
         
-        # 許可：ルート直下のスラッグ（/記事名）
         if path.startswith('/') and len(path) > 1:
-            # パスからスラッシュを除去
             clean_path = path[1:].rstrip('/')
-            # スラッシュが含まれていなくて、文字がある
             if clean_path and '/' not in clean_path:
                 return True
         
         return False
 
     def is_crawlable(self, url):
-        """クロール対象かどうか判定"""
         path = urlparse(self.normalize_url(url)).path.lower()
         
-        # 除外：明らかに不要なもの
         exclude_words = ['/site/', '/wp-admin', '/feed', '.jpg', '.png', '.css', '.js']
         if any(word in path for word in exclude_words):
             return False
         
-        # 許可：ブログ関連 + 記事ページ
         return (path.startswith('/blog') or self.is_article_page(url))
 
     def extract_links(self, soup, current_url):
-        """リンク抽出"""
         links = []
         for a in soup.find_all('a', href=True):
             href = a.get('href', '').strip()
@@ -66,7 +58,6 @@ class AnswerAnalyzer:
         return list(set(links))
 
     def extract_content_links(self, soup, current_url):
-        """コンテンツエリアからリンク抽出"""
         content = soup.select_one('.entry-content, .post-content, main, article')
         if not content:
             return []
@@ -82,26 +73,23 @@ class AnswerAnalyzer:
         return links
 
     def analyze(self, start_url):
-        """メイン分析処理"""
         self.pages, self.links, self.detailed_links = {}, [], []
         visited, to_visit = set(), [self.normalize_url(start_url)]
         
-        # ページネーションを追加
         to_visit.append('https://answer-genkinka.jp/blog/page/2/')
 
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
-        # プログレス表示
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # フェーズ1: ページ収集
         status_text.text("フェーズ1: ページ収集中...")
         
-        while to_visit and len(self.pages) < 100:  # Streamlit用に制限
+        while to_visit and len(self.pages) < 100:
             url = to_visit.pop(0)
-            if url in visited: continue
+            if url in visited: 
+                continue
             
             try:
                 status_text.text(f"処理中: {url}")
@@ -111,12 +99,10 @@ class AnswerAnalyzer:
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # NOINDEXチェック
                 robots = soup.find('meta', attrs={'name': 'robots'})
                 if robots and 'noindex' in robots.get('content', '').lower():
                     continue
                 
-                # 記事一覧ページは収集のみ
                 if '/blog' in url:
                     page_links = self.extract_links(soup, url)
                     new_links = [l for l in page_links if l not in visited and l not in to_visit]
@@ -124,38 +110,33 @@ class AnswerAnalyzer:
                     visited.add(url)
                     continue
                 
-                # 個別記事ページを保存
                 if self.is_article_page(url):
                     title = soup.find('h1')
                     title = title.get_text(strip=True) if title else url
                     
-                    # answer-genkinka | アンサー などのサイト名を除去
                     title = re.sub(r'\s*[|\-]\s*.*(answer-genkinka|アンサー).*$', '', title, flags=re.IGNORECASE)
                     
                     self.pages[url] = {'title': title, 'outbound_links': []}
                     
-                    # 新しいリンクを発見
                     page_links = self.extract_links(soup, url)
                     new_links = [l for l in page_links if l not in visited and l not in to_visit]
                     to_visit.extend(new_links)
                 
                 visited.add(url)
-                
                 progress_bar.progress(len(self.pages) / 100)
                 time.sleep(0.1)
                 
             except Exception as e:
-                st.error(f"エラー: {url} - {e}")
                 continue
 
-        # フェーズ2: リンク関係構築
         status_text.text("フェーズ2: リンク関係構築中...")
         
         processed = set()
         for i, url in enumerate(list(self.pages.keys())):
             try:
                 response = session.get(url, timeout=10)
-                if response.status_code != 200: continue
+                if response.status_code != 200: 
+                    continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 content_links = self.extract_content_links(soup, url)
@@ -169,8 +150,10 @@ class AnswerAnalyzer:
                             self.links.append((url, target))
                             self.pages[url]['outbound_links'].append(target)
                             self.detailed_links.append({
-                                'source_url': url, 'source_title': self.pages[url]['title'],
-                                'target_url': target, 'anchor_text': link_data['anchor_text']
+                                'source_url': url, 
+                                'source_title': self.pages[url]['title'],
+                                'target_url': target, 
+                                'anchor_text': link_data['anchor_text']
                             })
                             
                 progress_bar.progress(0.5 + 0.5 * i / len(self.pages))
@@ -178,7 +161,6 @@ class AnswerAnalyzer:
             except Exception as e:
                 continue
 
-        # 被リンク数計算
         for url in self.pages:
             self.pages[url]['inbound_links'] = sum(1 for s, t in self.links if t == url)
 
@@ -188,21 +170,17 @@ class AnswerAnalyzer:
         return self.pages, self.links, self.detailed_links
 
     def export_detailed_csv(self):
-        """詳細CSVエクスポート"""
         if not self.detailed_links:
             return None
             
-        # CSVデータ作成
         csv_data = []
         csv_data.append(['番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'])
         
-        # ターゲット別にグループ化
         targets = {}
         for link in self.detailed_links:
             target = link['target_url']
             targets.setdefault(target, []).append(link)
         
-        # 被リンク数でソート
         sorted_targets = sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)
         
         page_number = 1
@@ -212,13 +190,11 @@ class AnswerAnalyzer:
                 csv_data.append([page_number, title, target, link['source_title'], link['source_url'], link['anchor_text']])
             page_number += 1
         
-        # 孤立ページも追加
         for url, info in self.pages.items():
             if info['inbound_links'] == 0:
-                csv_data.append([row, info['title'], url, '', '', ''])
-                row += 1
+                csv_data.append([page_number, info['title'], url, '', '', ''])
+                page_number += 1
         
-        # CSV文字列に変換
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerows(csv_data)
@@ -234,14 +210,12 @@ def main():
     st.title("🔗 answer-genkinka.jp専用内部リンク分析ツール")
     st.markdown("**CustomTkinter完全移植版**")
     
-    # URL入力
     start_url = st.text_input(
         "分析開始URL",
         value="https://answer-genkinka.jp/blog/",
         help="answer-genkinka.jpの分析開始URL"
     )
     
-    # 分析実行
     if st.button("🚀 分析開始", type="primary"):
         if not start_url:
             st.error("URLを入力してください")
@@ -252,25 +226,20 @@ def main():
         with st.spinner("分析中..."):
             pages, links, detailed_links = analyzer.analyze(start_url)
         
-        # セッション状態に保存
-        st.session_state['answer_pages'] = pages
-        st.session_state['answer_links'] = links
-        st.session_state['answer_detailed_links'] = detailed_links
-        st.session_state['answer_analyzer'] = analyzer
+        if pages:
+            st.session_state['analyzer_data'] = {
+                'pages': pages,
+                'links': links,
+                'detailed_links': detailed_links,
+                'analyzer': analyzer
+            }
     
-    # 保存されたデータがあれば表示
-    if 'answer_pages' in st.session_state:
-        show_results()
-
-def show_results():
-    """結果表示（セッション状態から復元）"""
-    pages = st.session_state.get('answer_pages', {})
-    links = st.session_state.get('answer_links', [])
-    detailed_links = st.session_state.get('answer_detailed_links', [])
-    analyzer = st.session_state.get('answer_analyzer')
-    
-    if pages:
-        # 統計表示
+    if 'analyzer_data' in st.session_state:
+        data = st.session_state['analyzer_data']
+        pages = data['pages']
+        links = data['links']
+        analyzer = data['analyzer']
+        
         total = len(pages)
         isolated = sum(1 for p in pages.values() if p['inbound_links'] == 0)
         popular = sum(1 for p in pages.values() if p['inbound_links'] >= 5)
@@ -285,10 +254,8 @@ def show_results():
         with col4:
             st.metric("人気ページ", popular)
         
-        # 結果表示
         st.subheader("📊 分析結果（被リンク数順）")
         
-        # DataFrameに変換
         results_data = []
         for url, info in pages.items():
             results_data.append({
@@ -301,37 +268,29 @@ def show_results():
         df = pd.DataFrame(results_data)
         df_sorted = df.sort_values('被リンク数', ascending=False)
         
-        # グラフ表示
         if len(df_sorted) > 0:
             st.subheader("被リンク数ランキング（上位10件）")
             top_10 = df_sorted.head(10)
             chart_data = top_10.set_index('タイトル')['被リンク数']
             st.bar_chart(chart_data)
         
-        # 詳細テーブル
         st.subheader("詳細データ")
         st.dataframe(df_sorted, use_container_width=True)
         
-        # CSVダウンロード
-        if analyzer:
-            csv_content = analyzer.export_detailed_csv()
-            if csv_content:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"answer-genkinka-{timestamp}.csv"
-                
-                st.download_button(
-                    "📥 詳細CSVダウンロード",
-                    csv_content,
-                    filename,
-                    "text/csv",
-                    help="被リンク数順でソートされた詳細レポート",
-                    key=f"download_{timestamp}"
-                )
+        csv_content = analyzer.export_detailed_csv()
+        if csv_content:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"answer-genkinka-{timestamp}.csv"
+            
+            st.download_button(
+                "📥 詳細CSVダウンロード",
+                csv_content,
+                filename,
+                "text/csv",
+                help="被リンク数順でソートされた詳細レポート"
+            )
         
         st.success("✅ 分析完了!")
-    
-    else:
-        st.error("❌ データを取得できませんでした")
 
 if __name__ == "__main__":
     main()
