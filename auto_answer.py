@@ -205,12 +205,12 @@ class AnswerAnalyzer:
         # 被リンク数でソート
         sorted_targets = sorted(targets.items(), key=lambda x: len(x[1]), reverse=True)
         
-        row = 1
+        page_number = 1
         for target, links_list in sorted_targets:
             title = self.pages.get(target, {}).get('title', target)
             for link in links_list:
-                csv_data.append([row, title, target, link['source_title'], link['source_url'], link['anchor_text']])
-                row += 1
+                csv_data.append([page_number, title, target, link['source_title'], link['source_url'], link['anchor_text']])
+            page_number += 1
         
         # 孤立ページも追加
         for url, info in self.pages.items():
