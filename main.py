@@ -601,12 +601,22 @@ def show_individual_analysis():
             run_analysis(selected_site, config)
     
     with col2:
-        if st.button("📊 履歴表示"):
-            st.info("分析履歴機能は準備中です")
+        # 保存された結果があれば表示ボタンを追加
+        if f'pages_{selected_site}' in st.session_state:
+            if st.button("📊 結果表示"):
+                show_analysis_results(selected_site)
+        else:
+            if st.button("📊 履歴表示"):
+                st.info("分析履歴機能は準備中です")
     
     with col3:
         if st.button("⚙️ 設定"):
             st.info("個別設定機能は準備中です")
+    
+    # 保存されたデータがあれば自動表示
+    if f'pages_{selected_site}' in st.session_state:
+        st.divider()
+        show_analysis_results(selected_site)
 
 def show_statistics():
     """統計・比較画面"""
