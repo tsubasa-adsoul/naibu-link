@@ -1,11 +1,8 @@
 import streamlit as st
 import requests
-import subprocess
 import json
 from datetime import datetime
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from urllib.parse import urlparse
 import time
 
@@ -183,7 +180,7 @@ def main():
     
     # ヘッダー
     st.title("🎛️ 内部リンク分析 統括管理システム")
-    st.markdown("**13サイト対応 - 一元管理ダッシュボード**")
+    st.markdown("**16サイト対応 - 一元管理ダッシュボード**")
     
     # サイドバー - メニュー
     with st.sidebar:
@@ -283,7 +280,6 @@ def show_dashboard():
                 if config['status'] == 'active' and config.get('streamlit_url'):
                     if st.button(f"🚀 {config['name']} 分析実行", key=f"analyze_{site_key}"):
                         st.success(f"{config['name']} の分析を開始します...")
-                        # 実際の分析実行処理をここに追加
                         st.balloons()
                 else:
                     st.button(f"⏳ 準備中", disabled=True, key=f"disabled_{site_key}")
@@ -349,12 +345,9 @@ def show_individual_analysis():
             if st.button(f"🔍 {config['name']} 分析開始", type="primary"):
                 # 実際の分析処理
                 with st.spinner(f"{config['name']} を分析中..."):
-                    # ここで実際のStreamlitアプリを呼び出し
                     time.sleep(2)  # デモ用
                     
                 st.success("✅ 分析完了！")
-                
-                # ダミーデータで結果表示
                 show_demo_results(config['name'])
         
         with col2:
@@ -373,7 +366,7 @@ def show_individual_analysis():
         st.text("CustomTkinter → Streamlit 変換作業中...")
 
 def show_demo_results(site_name):
-    """デモ用結果表示"""
+    """デモ用結果表示（plotly不使用版）"""
     st.subheader(f"📊 {site_name} 分析結果")
     
     # ダミー統計
@@ -387,18 +380,28 @@ def show_demo_results(site_name):
     with col4:
         st.metric("人気ページ", "18", delta="3")
     
-    # ダミーグラフ
+    # Streamlit標準のチャート機能を使用
     import numpy as np
     chart_data = pd.DataFrame({
         'ページ': [f'ページ{i}' for i in range(1, 11)],
         '被リンク数': np.random.randint(1, 20, 10)
     })
     
-    fig = px.bar(chart_data, x='ページ', y='被リンク数', title="被リンク数ランキング（上位10件）")
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("被リンク数ランキング（上位10件）")
+    st.bar_chart(chart_data.set_index('ページ'))
     
-    # CSVダウンロード（ダミー）
-    csv_data = "ページタイトル,URL,被リンク数\nテストページ1,https://example.com/1,5\nテストページ2,https://example.com/2,3"
+    # 詳細テーブル表示
+    st.subheader("詳細データ")
+    sample_data = pd.DataFrame({
+        'ページタイトル': [f'サンプル記事{i}' for i in range(1, 6)],
+        'URL': [f'https://example.com/article{i}' for i in range(1, 6)],
+        '被リンク数': np.random.randint(1, 15, 5),
+        '発リンク数': np.random.randint(2, 8, 5)
+    })
+    st.dataframe(sample_data, use_container_width=True)
+    
+    # CSVダウンロード
+    csv_data = sample_data.to_csv(index=False)
     st.download_button(
         "📥 CSVダウンロード",
         csv_data,
