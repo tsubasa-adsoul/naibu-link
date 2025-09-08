@@ -400,11 +400,11 @@ def run_analysis(site_key, config):
                 chart_data = top_10.set_index('タイトル')['被リンク数']
                 st.bar_chart(chart_data)
         
-        # 詳細テーブル
+        # 詳細テーブル（常に表示）
         st.subheader("詳細データ")
         st.dataframe(df_sorted, use_container_width=True)
         
-        # CSVダウンロード
+        # CSVダウンロード（詳細データは消えない）
         if detailed_links:
             csv_content = create_detailed_csv(pages, detailed_links)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
