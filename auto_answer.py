@@ -252,50 +252,68 @@ def main():
         with st.spinner("分析中..."):
             pages, links, detailed_links = analyzer.analyze(start_url)
         
-        if pages:
-            # 統計表示
-            total = len(pages)
-            isolated = sum(1 for p in pages.values() if p['inbound_links'] == 0)
-            popular = sum(1 for p in pages.values() if p['inbound_links'] >= 5)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("総記事数", total)
-            with col2:
-                st.metric("総リンク数", len(links))
-            with col3:
-                st.metric("孤立ページ", isolated)
-            with col4:
-                st.metric("人気ページ", popular)
-            
-            # 結果表示
-            st.subheader("📊 分析結果（被リンク数順）")
-            
-            # DataFrameに変換
-            results_data = []
-            for url, info in pages.items():
-                results_data.append({
-                    'タイトル': info['title'],
-                    'URL': url,
-                    '被リンク数': info['inbound_links'],
-                    '発リンク数': len(info['outbound_links'])
-                })
-            
-            df = pd.DataFrame(results_data)
-            df_sorted = df.sort_values('被リンク数', ascending=False)
-            
-            # グラフ表示
-            if len(df_sorted) > 0:
-                st.subheader("被リンク数ランキング（上位10件）")
-                top_10 = df_sorted.head(10)
-                chart_data = top_10.set_index('タイトル')['被リンク数']
-                st.bar_chart(chart_data)
-            
-            # 詳細テーブル
-            st.subheader("詳細データ")
-            st.dataframe(df_sorted, use_container_width=True)
-            
-            # CSVダウンロード
+        # セッション状態に保存
+        st.session_state['answer_pages'] = pages
+        st.session_state['answer_links'] = links
+        st.session_state['answer_detailed_links'] = detailed_links
+        st.session_state['answer_analyzer'] = analyzer
+    
+    # 保存されたデータがあれば表示
+    if 'answer_pages' in st.session_state:
+        show_results()
+
+def show_results():
+    """結果表示（セッション状態から復元）"""
+    pages = st.session_state.get('answer_pages', {})
+    links = st.session_state.get('answer_links', [])
+    detailed_links = st.session_state.get('answer_detailed_links', [])
+    analyzer = st.session_state.get('answer_analyzer')
+    
+    if pages:
+        # 統計表示
+        total = len(pages)
+        isolated = sum(1 for p in pages.values() if p['inbound_links'] == 0)
+        popular = sum(1 for p in pages.values() if p['inbound_links'] >= 5)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("総記事数", total)
+        with col2:
+            st.metric("総リンク数", len(links))
+        with col3:
+            st.metric("孤立ページ", isolated)
+        with col4:
+            st.metric("人気ページ", popular)
+        
+        # 結果表示
+        st.subheader("📊 分析結果（被リンク数順）")
+        
+        # DataFrameに変換
+        results_data = []
+        for url, info in pages.items():
+            results_data.append({
+                'タイトル': info['title'],
+                'URL': url,
+                '被リンク数': info['inbound_links'],
+                '発リンク数': len(info['outbound_links'])
+            })
+        
+        df = pd.DataFrame(results_data)
+        df_sorted = df.sort_values('被リンク数', ascending=False)
+        
+        # グラフ表示
+        if len(df_sorted) > 0:
+            st.subheader("被リンク数ランキング（上位10件）")
+            top_10 = df_sorted.head(10)
+            chart_data = top_10.set_index('タイトル')['被リンク数']
+            st.bar_chart(chart_data)
+        
+        # 詳細テーブル
+        st.subheader("詳細データ")
+        st.dataframe(df_sorted, use_container_width=True)
+        
+        # CSVダウンロード
+        if analyzer:
             csv_content = analyzer.export_detailed_csv()
             if csv_content:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -306,13 +324,14 @@ def main():
                     csv_content,
                     filename,
                     "text/csv",
-                    help="被リンク数順でソートされた詳細レポート"
+                    help="被リンク数順でソートされた詳細レポート",
+                    key=f"download_{timestamp}"
                 )
-            
-            st.success("✅ 分析完了!")
         
-        else:
-            st.error("❌ データを取得できませんでした")
+        st.success("✅ 分析完了!")
+    
+    else:
+        st.error("❌ データを取得できませんでした")
 
 if __name__ == "__main__":
     main()
