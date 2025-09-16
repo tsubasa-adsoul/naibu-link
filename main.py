@@ -504,10 +504,8 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-# ネットワーク図部分の修正版（streamlit_app.pyの該当部分を差し替え）
-
             elif network_type == "ネットワーク図（中重量）":
-                # 改良版Plotlyネットワーク図
+                # Plotlyネットワーク図
                 st.info("🔄 ネットワーク図を生成中...")
                 
                 # エッジデータ準備
@@ -516,122 +514,67 @@ def main():
                     (df['C_URL'].astype(str) != "")
                 ][['E_被リンク元ページURL', 'C_URL']].copy()
                 
-                # 上位ページのみ（さらに絞り込み）
-                display_count = min(network_top_n, 25)  # 最大25件に制限
-                top_urls = set(pages_df.head(display_count)['C_URL'])
+                # 上位ページのみ
+                top_urls = set(pages_df.head(network_top_n)['C_URL'])
                 edges_filtered = edges_df[
-                    edges_df['C_URL'].isin(top_urls) |
-                    edges_df['E_被リンク元ページURL'].isin(top_urls)
+                    edges_df['C_URL'].isin(top_urls)
                 ]
                 
                 if not edges_filtered.empty:
-                    # エッジ集約
-                    edge_counts = edges_filtered.groupby(['E_被リンク元ページURL', 'C_URL']).size().reset_index(name='weight')
+                    # ノード準備
+                    nodes = set(edges_filtered['E_被リンク元ページURL']).union(set(edges_filtered['C_URL']))
+                    node_list = list(nodes)
+                    node_indices = {node: i for i, node in enumerate(node_list)}
                     
-                    # ノード準備（重複回避）
-                    all_nodes = set(edge_counts['E_被リンク元ページURL']).union(set(edge_counts['C_URL']))
-                    node_list = sorted(list(all_nodes))
+                    # エッジ準備
+                    edge_trace = []
+                    for _, row in edges_filtered.iterrows():
+                        x0, y0 = divmod(node_indices[row['E_被リンク元ページURL']], 10)
+                        x1, y1 = divmod(node_indices[row['C_URL']], 10)
+                        edge_trace.extend([x0, x1, None])
+                        edge_trace.extend([y0, y1, None])
                     
-                    # Force-directed layout simulation (簡易版)
-                    import math
-                    import random
-                    random.seed(42)  # 再現性のため
-                    
-                    n_nodes = len(node_list)
-                    
-                    # 円形配置をベースにした初期位置
-                    node_positions = {}
-                    if n_nodes == 1:
-                        node_positions[node_list[0]] = (0, 0)
-                    else:
-                        for i, node in enumerate(node_list):
-                            angle = 2 * math.pi * i / n_nodes
-                            radius = max(5, math.sqrt(n_nodes)) * 2  # 適切な半径
-                            x = radius * math.cos(angle) + random.uniform(-1, 1)
-                            y = radius * math.sin(angle) + random.uniform(-1, 1)
-                            node_positions[node] = (x, y)
-                    
-                    # ノードサイズとカラー
-                    node_x = [node_positions[node][0] for node in node_list]
-                    node_y = [node_positions[node][1] for node in node_list]
-                    node_sizes = [max(8, min(40, inbound_counts.get(node, 0) * 3)) for node in node_list]
-                    node_colors = [inbound_counts.get(node, 0) for node in node_list]
-                    
-                    # ページタイトル取得（短縮版）
-                    def get_short_title(url, max_len=20):
-                        # URL→タイトルマッピング
-                        title_map = {}
-                        for _, row in df[['B_ページタイトル', 'C_URL']].drop_duplicates().iterrows():
-                            if row['C_URL']:
-                                title_map[row['C_URL']] = row['B_ページタイトル']
-                        for _, row in df[['D_被リンク元ページタイトル', 'E_被リンク元ページURL']].drop_duplicates().iterrows():
-                            if row['E_被リンク元ページURL']:
-                                title_map.setdefault(row['E_被リンク元ページURL'], row['D_被リンク元ページタイトル'])
-                        
-                        title = safe_str(title_map.get(url, url))
-                        return (title[:max_len] + "...") if len(title) > max_len else title
-                    
-                    node_labels = [get_short_title(node) for node in node_list]
-                    node_hover = [f"{get_short_title(node, 50)}<br>被リンク: {inbound_counts.get(node, 0)}<br>{node}" 
-                                 for node in node_list]
-                    
-                    # エッジ描画用データ
-                    edge_x, edge_y = [], []
-                    edge_weights = []
-                    
-                    for _, row in edge_counts.iterrows():
-                        src_pos = node_positions[row['E_被リンク元ページURL']]
-                        dst_pos = node_positions[row['C_URL']]
-                        
-                        edge_x.extend([src_pos[0], dst_pos[0], None])
-                        edge_y.extend([src_pos[1], dst_pos[1], None])
-                        edge_weights.append(row['weight'])
+                    # ノード位置とサイズ
+                    node_x = [i // 10 for i in range(len(node_list))]
+                    node_y = [i % 10 for i in range(len(node_list))]
+                    node_sizes = [max(10, inbound_counts.get(node, 0) * 2) for node in node_list]
                     
                     # グラフ作成
                     fig = go.Figure()
                     
                     # エッジ描画
                     fig.add_trace(go.Scatter(
-                        x=edge_x,
-                        y=edge_y,
+                        x=edge_trace[::3],
+                        y=edge_trace[1::3],
                         mode='lines',
-                        line=dict(width=1, color='rgba(50,50,50,0.3)'),
+                        line=dict(width=0.5, color='#888'),
                         hoverinfo='none',
-                        showlegend=False,
-                        name='Links'
+                        showlegend=False
                     ))
                     
                     # ノード描画
                     fig.add_trace(go.Scatter(
                         x=node_x,
                         y=node_y,
-                        mode='markers+text',
+                        mode='markers',
                         marker=dict(
                             size=node_sizes,
-                            color=node_colors,
-                            colorscale='Blues',
-                            line=dict(width=1, color='darkblue'),
-                            showscale=True,
-                            colorbar=dict(title="被リンク数")
+                            color='lightblue',
+                            line=dict(width=1, color='darkblue')
                         ),
-                        text=node_labels,
-                        textposition="middle center",
-                        textfont=dict(size=8, color="white"),
+                        text=[f"被リンク: {inbound_counts.get(node, 0)}" for node in node_list],
                         hoverinfo='text',
-                        hovertext=node_hover,
-                        showlegend=False,
-                        name='Pages'
+                        showlegend=False
                     ))
                     
-                    # レイアウト設定
                     fig.update_layout(
-                        title=f"内部リンクネットワーク (上位{display_count}件)",
+                        title="内部リンクネットワーク",
                         showlegend=False,
                         hovermode='closest',
-                        margin=dict(b=20, l=5, r=5, t=40),
+                        margin=dict(b=20,l=5,r=5,t=40),
                         annotations=[
                             dict(
-                                text="ノードサイズ・色 = 被リンク数",
+                                text="ノードサイズ = 被リンク数",
                                 showarrow=False,
                                 xref="paper", yref="paper",
                                 x=0.005, y=-0.002,
@@ -639,33 +582,12 @@ def main():
                                 font=dict(size=12)
                             )
                         ],
-                        xaxis=dict(
-                            showgrid=False, 
-                            zeroline=False, 
-                            showticklabels=False,
-                            scaleanchor="y",
-                            scaleratio=1
-                        ),
-                        yaxis=dict(
-                            showgrid=False, 
-                            zeroline=False, 
-                            showticklabels=False
-                        ),
-                        height=700,
-                        plot_bgcolor='white'
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        height=600
                     )
                     
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    # 統計情報表示
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("ノード数", len(node_list))
-                    with col2:
-                        st.metric("エッジ数", len(edge_counts))
-                    with col3:
-                        st.metric("表示上位", display_count)
-                        
                 else:
                     st.warning("⚠️ 表示できるネットワークデータがありません。")
             
@@ -675,200 +597,130 @@ def main():
                 else:
                     st.info("🔄 インタラクティブネットワーク図を生成中...")
                     
-                    # 表示件数をさらに制限
-                    max_nodes = min(network_top_n, 30)  # 最大30件
-                    st.warning(f"⚠️ パフォーマンスのため上位{max_nodes}件に制限します")
-                    
+                    # 元のローカル版のコードをそのまま採用
                     try:
-                        # エッジデータ準備（より厳格な絞り込み）
                         edges_df = df[
                             (df['E_被リンク元ページURL'].astype(str) != "") &
                             (df['C_URL'].astype(str) != "")
                         ][['D_被リンク元ページタイトル', 'E_被リンク元ページURL',
                            'B_ページタイトル', 'C_URL']].copy()
+
+                        def in_site(u: str) -> bool:
+                            try:
+                                d = urlparse(u).netloc.lower()
+                                if d.startswith("www."): d = d[4:]
+                                return (not site_domain) or (d == site_domain) or d.endswith("." + site_domain)
+                            except Exception:
+                                return True
                         
-                        # より厳しいフィルタリング
-                        top_targets = set(pages_df.head(max_nodes)['C_URL'])
-                        edges_filtered = edges_df[edges_df['C_URL'].isin(top_targets)]
+                        edges_df = edges_df[edges_df['E_被リンク元ページURL'].apply(in_site) & edges_df['C_URL'].apply(in_site)]
                         
-                        # さらに被リンク元も上位のみに制限
-                        top_sources = set(pages_df.head(max_nodes * 2)['C_URL'])  # ソースは2倍まで許可
-                        edges_filtered = edges_filtered[
-                            edges_filtered['E_被リンク元ページURL'].isin(top_sources)
-                        ]
+                        if edges_df.empty:
+                            st.warning("⚠️ 描画対象エッジがありません。")
+                            return
+
+                        in_counts = edges_df.groupby('C_URL').size().sort_values(ascending=False)
+
+                        TOP_N = network_top_n  # サイドバーの設定値を使用
+                        top_targets = set(in_counts.head(TOP_N).index)
+
+                        sub = edges_df[edges_df['C_URL'].isin(top_targets)].copy()
+                        agg = sub.groupby(['E_被リンク元ページURL', 'C_URL']).size().reset_index(name='weight')
+
+                        url2title = {}
+                        for _, r in df[['B_ページタイトル','C_URL']].drop_duplicates().iterrows():
+                            if r['C_URL']:
+                                url2title[r['C_URL']] = r['B_ページタイトル']
+                        for _, r in df[['D_被リンク元ページタイトル','E_被リンク元ページURL']].drop_duplicates().iterrows():
+                            if r['E_被リンク元ページURL']:
+                                url2title.setdefault(r['E_被リンク元ページURL'], r['D_被リンク元ページタイトル'])
+
+                        def short_label(u: str, n=24) -> str:
+                            t = str(url2title.get(u, u))
+                            return (t[:n] + "…") if len(t) > n else t
+
+                        net = Network(height="800px", width="100%", directed=True, bgcolor="#ffffff")
+                        options = {
+                            "physics": {
+                                "enabled": True,
+                                "solver": "barnesHut",
+                                "barnesHut": {
+                                    "gravitationalConstant": -8000,
+                                    "centralGravity": 0.3,
+                                    "springLength": 160,
+                                    "springConstant": 0.03,
+                                    "damping": 0.12,
+                                    "avoidOverlap": 0.1
+                                },
+                                "stabilization": {"enabled": True, "iterations": 120, "updateInterval": 25},
+                                "minVelocity": 1,
+                                "timestep": 0.6
+                            },
+                            "interaction": {
+                                "hover": True, "zoomView": True, "dragView": True,
+                                "dragNodes": True, "navigationButtons": True, "keyboard": True
+                            },
+                            "nodes": {"shape": "dot", "font": {"size": 12}},
+                            "edges": {"smooth": {"enabled": True, "type": "dynamic"},
+                                      "scaling": {"min": 1, "max": 8}}
+                        }
+                        net.set_options(json.dumps(options))
+
+                        nodes = set(agg['E_被リンク元ページURL']).union(set(agg['C_URL']))
                         
-                        if not edges_filtered.empty:
-                            # エッジ集約（重み1のエッジは除外）
-                            edge_agg = edges_filtered.groupby(['E_被リンク元ページURL', 'C_URL']).size().reset_index(name='weight')
-                            edge_agg = edge_agg[edge_agg['weight'] >= 1]  # 最低1リンク以上
+                        def node_size(u: str) -> int:
+                            s = int(in_counts.get(u, 0))
+                            return max(12, min(48, int(12 + math.log2(s + 1) * 8)))
+
+                        for u in nodes:
+                            net.add_node(
+                                u,
+                                label=short_label(u),
+                                title=f"{url2title.get(u, u)}<br>{u}",
+                                size=node_size(u)
+                            )
+
+                        for _, r in agg.iterrows():
+                            src = r['E_被リンク元ページURL']
+                            dst = r['C_URL']
+                            w   = int(r['weight'])
+                            net.add_edge(src, dst, value=w, arrows="to")
+
+                        # 一時ファイルに保存してからStreamlitで表示
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_file:
+                            net.write_html(tmp_file.name, open_browser=False)
                             
-                            # タイトルマッピング
-                            url_to_title = {}
-                            for _, row in df[['B_ページタイトル', 'C_URL']].drop_duplicates().iterrows():
-                                if row['C_URL']:
-                                    url_to_title[row['C_URL']] = row['B_ページタイトル']
-                            for _, row in df[['D_被リンク元ページタイトル', 'E_被リンク元ページURL']].drop_duplicates().iterrows():
-                                if row['E_被リンク元ページURL']:
-                                    url_to_title.setdefault(row['E_被リンク元ページURL'], row['D_被リンク元ページタイトル'])
+                            with open(tmp_file.name, 'r', encoding='utf-8') as f:
+                                html_content = f.read()
                             
-                            # PyVisネットワーク作成（軽量化設定）
-                            net = Network(
-                                height="650px", 
-                                width="100%", 
-                                directed=True, 
-                                bgcolor="#ffffff",
-                                font_color="black"
+                            # Streamlit用にHTMLを調整
+                            html_content = html_content.replace(
+                                '<div id="mynetworkid"',
+                                '<div id="mynetworkid" style="border: 1px solid #ddd;"'
                             )
                             
-                            # 軽量化オプション
-                            options = {
-                                "physics": {
-                                    "enabled": True,
-                                    "solver": "forceAtlas2Based",
-                                    "forceAtlas2Based": {
-                                        "gravitationalConstant": -50,
-                                        "centralGravity": 0.01,
-                                        "springLength": 100,
-                                        "springConstant": 0.08,
-                                        "damping": 0.4,
-                                        "avoidOverlap": 0.5
-                                    },
-                                    "stabilization": {
-                                        "enabled": True, 
-                                        "iterations": 100,
-                                        "updateInterval": 25
-                                    },
-                                    "maxVelocity": 30,
-                                    "minVelocity": 1,
-                                    "timestep": 0.5
-                                },
-                                "interaction": {
-                                    "hover": True,
-                                    "tooltipDelay": 200,
-                                    "hideEdgesOnDrag": True,
-                                    "hideNodesOnDrag": False
-                                },
-                                "nodes": {
-                                    "shape": "dot",
-                                    "font": {"size": 14, "face": "arial"},
-                                    "borderWidth": 2,
-                                    "shadow": True
-                                },
-                                "edges": {
-                                    "smooth": {"enabled": False},  # スムースエッジを無効化
-                                    "width": 2,
-                                    "shadow": False
-                                }
-                            }
-                            net.set_options(json.dumps(options))
+                            # Streamlitで表示
+                            st.components.v1.html(html_content, height=850)
                             
-                            # ノード追加（重複除去）
-                            nodes = set(edge_agg['E_被リンク元ページURL']).union(set(edge_agg['C_URL']))
+                            # 統計表示
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("ノード数", len(nodes))
+                            with col2:
+                                st.metric("エッジ数", len(agg))
+                            with col3:
+                                st.metric("上位ターゲット数", len(top_targets))
                             
-                            def short_label(url, max_len=20):
-                                title = str(url_to_title.get(url, url))
-                                return (title[:max_len] + "...") if len(title) > max_len else title
+                            # ダウンロードリンク
+                            filename = f"interactive_network_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                            download_link = create_download_link(html_content, filename, "📥 ネットワーク図をダウンロード")
+                            st.markdown(download_link, unsafe_allow_html=True)
                             
-                            def node_size_calc(url):
-                                count = int(inbound_counts.get(url, 0))
-                                return max(20, min(60, int(20 + math.log2(count + 1) * 10)))
-                            
-                            def node_color(url):
-                                count = int(inbound_counts.get(url, 0))
-                                if count >= 10:
-                                    return "#ff4444"  # 赤：高被リンク
-                                elif count >= 5:
-                                    return "#ff8844"  # オレンジ：中被リンク
-                                elif count >= 2:
-                                    return "#4488ff"  # 青：低被リンク
-                                else:
-                                    return "#888888"  # グレー：被リンクなし
-                            
-                            for url in nodes:
-                                net.add_node(
-                                    url,
-                                    label=short_label(url),
-                                    title=f"<b>{url_to_title.get(url, url)}</b><br>被リンク数: {inbound_counts.get(url, 0)}<br>URL: {url}",
-                                    size=node_size_calc(url),
-                                    color=node_color(url)
-                                )
-                            
-                            # エッジ追加（重み調整）
-                            for _, row in edge_agg.iterrows():
-                                src = row['E_被リンク元ページURL']
-                                dst = row['C_URL']
-                                weight = int(row['weight'])
-                                
-                                net.add_edge(
-                                    src, dst, 
-                                    value=min(weight * 2, 10),  # エッジの太さ制限
-                                    arrows="to",
-                                    title=f"リンク数: {weight}"
-                                )
-                            
-                            # HTML生成と表示
-                            try:
-                                # 一時ファイル作成
-                                with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_file:
-                                    net.write_html(tmp_file.name)
-                                    
-                                    # ファイルを読み込み
-                                    with open(tmp_file.name, 'r', encoding='utf-8') as f:
-                                        html_content = f.read()
-                                    
-                                    # HTML内容を調整（Streamlit表示用）
-                                    html_content = html_content.replace(
-                                        'height: 600px',
-                                        'height: 650px; border: 1px solid #ddd; border-radius: 8px;'
-                                    )
-                                    
-                                    # Streamlitで表示
-                                    st.components.v1.html(html_content, height=700, scrolling=True)
-                                    
-                                    # 統計表示
-                                    col1, col2, col3, col4 = st.columns(4)
-                                    with col1:
-                                        st.metric("ノード数", len(nodes))
-                                    with col2:
-                                        st.metric("エッジ数", len(edge_agg))
-                                    with col3:
-                                        st.metric("最大被リンク", max(inbound_counts.get(n, 0) for n in nodes))
-                                    with col4:
-                                        avg_degree = len(edge_agg) / len(nodes) if nodes else 0
-                                        st.metric("平均次数", f"{avg_degree:.1f}")
-                                    
-                                    # 操作説明
-                                    st.info("""
-                                    💡 **操作方法:**
-                                    - マウスドラッグ: 表示範囲移動
-                                    - マウスホイール: ズーム
-                                    - ノードドラッグ: ノード位置調整
-                                    - ノードホバー: 詳細情報表示
-                                    """)
-                                    
-                                    # ダウンロードリンク
-                                    filename = f"network_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                                    download_link = create_download_link(html_content, filename, "📥 ネットワーク図をダウンロード")
-                                    st.markdown(download_link, unsafe_allow_html=True)
-                                    
-                                    # 一時ファイル削除
-                                    os.unlink(tmp_file.name)
-                                    
-                            except Exception as e:
-                                st.error(f"❌ ネットワーク図の表示に失敗: {e}")
-                                
-                                # フォールバック：簡易リスト表示
-                                st.subheader("📋 ネットワーク構成（簡易表示）")
-                                fallback_df = pd.DataFrame({
-                                    'ページ': [url_to_title.get(url, url) for url in sorted(nodes, key=lambda x: inbound_counts.get(x, 0), reverse=True)],
-                                    '被リンク数': [inbound_counts.get(url, 0) for url in sorted(nodes, key=lambda x: inbound_counts.get(x, 0), reverse=True)]
-                                })
-                                st.dataframe(fallback_df, use_container_width=True)
-                        else:
-                            st.warning("⚠️ 表示できるネットワークデータがありません。")
-                    
+                            # 一時ファイル削除
+                            os.unlink(tmp_file.name)
+
                     except Exception as e:
-                        st.error(f"❌ インタラクティブネットワーク図の生成に失敗: {e}")
+                        st.error(f"❌ ネットワーク図の生成に失敗しました: {e}")
                         st.write("エラー詳細:", str(e))
         
         # Tab 5: 総合レポート
