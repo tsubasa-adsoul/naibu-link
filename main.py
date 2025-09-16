@@ -75,17 +75,20 @@ class AnswerAnalyzer:
 
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        
+        max_pages = 50 # 収集ページ数の上限（テスト用）
 
         # フェーズ1: ページ収集
-        while to_visit and len(self.pages) < 50:
+        while to_visit and len(self.pages) < max_pages:
             url = to_visit.pop(0)
             if url in visited: continue
             
             try:
                 if progress_callback:
-                    progress_callback(f"収集中: {url}")
+                    progress_callback(f"収集中 ({len(self.pages)}/{max_pages}): {url}", len(self.pages) / max_pages)
                     
                 response = session.get(url, timeout=10)
+                visited.add(url)
                 if response.status_code != 200: continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -98,7 +101,6 @@ class AnswerAnalyzer:
                     page_links = self.extract_links(soup, url)
                     new_links = [l for l in page_links if l not in visited and l not in to_visit]
                     to_visit.extend(new_links)
-                    visited.add(url)
                     continue
                 
                 if self.is_article_page(url):
@@ -111,7 +113,6 @@ class AnswerAnalyzer:
                     new_links = [l for l in page_links if l not in visited and l not in to_visit]
                     to_visit.extend(new_links)
                 
-                visited.add(url)
                 time.sleep(0.1)
                 
             except Exception:
@@ -119,10 +120,10 @@ class AnswerAnalyzer:
 
         # フェーズ2: リンク関係構築
         if progress_callback:
-            progress_callback("リンク関係構築中...")
+            progress_callback("リンク関係構築中...", 0.9)
             
         processed = set()
-        for url in list(self.pages.keys()):
+        for i, url in enumerate(list(self.pages.keys())):
             try:
                 response = session.get(url, timeout=10)
                 if response.status_code != 200: continue
@@ -151,15 +152,172 @@ class AnswerAnalyzer:
 
         return self.pages, self.links, self.detailed_links
 
-# その他サイト用のダミー分析クラス（後で実装）
+### ▼▼▼ 変更点1: ArigatayaAnalyzerクラスの追加 ▼▼▼
+class ArigatayaAnalyzer:
+    def __init__(self):
+        self.pages = {}
+        self.links = []
+        self.detailed_links = []
+        self.base_url = None
+        self.domain = None
+
+    def normalize_url(self, url):
+        try:
+            parsed = urlparse(url)
+            path = parsed.path.split('?')[0].split('#')[0]
+            netloc = parsed.netloc.replace('www.', '')
+            path = path.rstrip('/')
+            if not path:
+                return f"https://{netloc}"
+            return f"https://{netloc}{path}"
+        except Exception:
+            return url
+
+    def is_internal(self, url):
+        return urlparse(url).netloc.replace('www.', '') == self.domain
+
+    def extract_from_sitemap(self, url, visited_sitemaps):
+        if url in visited_sitemaps:
+            return set()
+        visited_sitemaps.add(url)
+        urls = set()
+        try:
+            res = requests.get(url, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.content, 'xml')
+            if soup.find('sitemapindex'):
+                for loc in soup.find_all('loc'):
+                    urls.update(self.extract_from_sitemap(loc.text.strip(), visited_sitemaps))
+            else:
+                for loc in soup.find_all('loc'):
+                    urls.add(self.normalize_url(loc.text.strip()))
+        except Exception as e:
+            print(f"サイトマップエラー ({url}): {e}")
+        return urls
+
+    def generate_seed_urls(self):
+        sitemap_root = urljoin(self.base_url, '/sitemap.xml')
+        sitemap_urls = self.extract_from_sitemap(sitemap_root, set())
+        print(f"サイトマップから {len(sitemap_urls)} 個のURLを取得しました。")
+        seed_urls = set([self.normalize_url(self.base_url)]) | sitemap_urls
+        return list(seed_urls)
+
+    def is_content(self, url):
+        try:
+            path = urlparse(url).path.lower()
+            exclude_patterns = [
+                r'\.(jpg|jpeg|png|gif|webp|svg|ico|pdf|zip)$', r'/wp-admin', r'/wp-json', r'/wp-includes',
+                r'/wp-content/plugins', r'/feed', r'/comments/feed', r'/trackback', r'sitemap\.xml',
+                r'\/go\/', r'\/g\/', r'\/tag\/', r'\/author\/', r'\/privacy',
+            ]
+            if any(re.search(pattern, path) for pattern in exclude_patterns):
+                return False
+            clean_path = path.strip('/')
+            if ('/' not in clean_path and clean_path) or path == '/' or not path or path.startswith('/category/'):
+                return True
+            return False
+        except Exception:
+            return False
+
+    def is_noindex_page(self, soup):
+        meta_robots = soup.find('meta', attrs={'name': 'robots'})
+        if meta_robots and 'noindex' in meta_robots.get('content', '').lower():
+            return True
+        return False
+
+    def extract_links(self, soup, base_url):
+        links = []
+        content_area = soup.select_one('.post_content, .entry-content, main, article') or soup
+        for a in content_area.find_all('a', href=True):
+            href = a.get('href')
+            if href and not href.startswith(('#', 'javascript:', 'mailto:')):
+                full_url = urljoin(base_url, href)
+                if self.is_internal(full_url):
+                    links.append({'url': self.normalize_url(full_url), 'anchor_text': a.get_text(strip=True)[:100]})
+        for tag in content_area.find_all(onclick=True):
+            onclick_val = tag.get('onclick')
+            match = re.search(r"location\.href='([^']+)'", onclick_val)
+            if match:
+                href = match.group(1)
+                full_url = urljoin(base_url, href)
+                if self.is_internal(full_url):
+                    links.append({'url': self.normalize_url(full_url), 'anchor_text': tag.get_text(strip=True)[:100]})
+        return links
+
+    def analyze(self, start_url, progress_callback=None):
+        self.base_url = start_url
+        self.domain = urlparse(start_url).netloc.replace('www.', '')
+        self.pages, self.links, self.detailed_links = {}, [], []
+        
+        if progress_callback:
+            progress_callback("サイトマップからURLを収集中...", 0.0)
+        
+        to_visit = self.generate_seed_urls()
+        visited, processed_links = set(), set()
+        
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        
+        max_pages = 500
+        queue = list(dict.fromkeys(to_visit))
+        
+        while queue and len(self.pages) < max_pages:
+            url = queue.pop(0)
+            if url in visited or not self.is_content(url):
+                visited.add(url)
+                continue
+
+            try:
+                if progress_callback:
+                    progress = len(self.pages) / max_pages
+                    progress_callback(f"分析中 ({len(self.pages)}/{max_pages}): {url}", progress)
+                
+                response = session.get(url, timeout=10)
+                visited.add(url)
+                if response.status_code != 200: continue
+                
+                soup = BeautifulSoup(response.text, 'html.parser')
+                if self.is_noindex_page(soup): continue
+
+                title = (soup.title.string.strip() if soup.title and soup.title.string else url)
+                title = re.sub(r'\s*[|\-]\s*.*(arigataya|ありがたや).*$', '', title, flags=re.IGNORECASE).strip()
+                
+                if url not in self.pages:
+                    self.pages[url] = {'title': title, 'outbound_links': [], 'inbound_links': 0}
+
+                extracted_links = self.extract_links(soup, url)
+                for link_data in extracted_links:
+                    target_url = link_data['url']
+                    if self.is_content(target_url):
+                        link_key = (url, target_url)
+                        if link_key not in processed_links:
+                            self.pages[url]['outbound_links'].append(target_url)
+                            self.detailed_links.append({'source_url': url, 'source_title': title, 'target_url': target_url, 'anchor_text': link_data['anchor_text']})
+                            self.links.append(link_key)
+                            processed_links.add(link_key)
+                        if target_url not in visited and target_url not in queue:
+                            queue.append(target_url)
+                time.sleep(0.1)
+
+            except Exception as e:
+                print(f"エラー ({url}): {e}")
+                continue
+
+        if progress_callback: progress_callback("被リンク数を計算中...", 0.95)
+        for page_url in self.pages: self.pages[page_url]['inbound_links'] = 0
+        for _, target in self.links:
+            if target in self.pages: self.pages[target]['inbound_links'] += 1
+        
+        return self.pages, self.links, self.detailed_links
+
+# その他サイト用のダミー分析クラス
 class GenericAnalyzer:
-    def __init__(self, site_name, base_url):
-        self.site_name = site_name
-        self.base_url = base_url
+    def __init__(self):
+        pass
 
     def analyze(self, start_url, progress_callback=None):
         if progress_callback:
-            progress_callback(f"{self.site_name} の分析は準備中です...")
+            progress_callback(f"このサイトの分析エンジンは準備中です...", 0)
         return {}, [], []
 
 # サイト設定
@@ -173,14 +331,15 @@ ANALYZER_CONFIGS = {
         "color": "#FF6B6B",
         "analyzer_class": AnswerAnalyzer
     },
+    ### ▼▼▼ 変更点2: ANALYZER_CONFIGSの更新 ▼▼▼
     "arigataya.co.jp": {
         "name": "ありがたや", 
         "url": "https://arigataya.co.jp",
-        "status": "planned",
+        "status": "active", # "planned" から "active" に変更
         "description": "onclick対応・全自動版",
         "features": ["onclick対応", "自動リンク検出"],
         "color": "#4ECDC4",
-        "analyzer_class": GenericAnalyzer
+        "analyzer_class": ArigatayaAnalyzer # GenericAnalyzer から ArigatayaAnalyzer に変更
     },
     "kau-ru.co.jp": {
         "name": "カウール",
@@ -346,14 +505,13 @@ def run_analysis(site_key, config):
     status_placeholder = st.empty()
     progress_bar = st.progress(0)
     
-    def progress_callback(message):
+    def progress_callback(message, progress):
         status_placeholder.text(message)
+        progress_bar.progress(progress)
     
     # 分析実行
-    if config['analyzer_class'] == AnswerAnalyzer:
-        analyzer = AnswerAnalyzer()
-    else:
-        analyzer = GenericAnalyzer(config['name'], config['url'])
+    analyzer_class = config.get("analyzer_class", GenericAnalyzer)
+    analyzer = analyzer_class()
     
     pages, links, detailed_links = analyzer.analyze(config['url'], progress_callback)
     
@@ -400,11 +558,11 @@ def run_analysis(site_key, config):
                 chart_data = top_10.set_index('タイトル')['被リンク数']
                 st.bar_chart(chart_data)
         
-        # 詳細テーブル（常に表示）
+        # 詳細テーブル
         st.subheader("詳細データ")
         st.dataframe(df_sorted, use_container_width=True)
         
-        # CSVダウンロード（詳細データは消えない）
+        # CSVダウンロード
         if detailed_links:
             csv_content = create_detailed_csv(pages, detailed_links)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -437,14 +595,17 @@ def main():
     st.title("🎛️ 内部リンク分析 統括管理システム")
     st.markdown("**16サイト対応 - 一元管理ダッシュボード**")
     
+    # セッションステートの初期化
+    if 'active_analysis' not in st.session_state:
+        st.session_state.active_analysis = None
+    if 'analysis_results' not in st.session_state:
+        st.session_state.analysis_results = {}
+    
     # サイドバー
     with st.sidebar:
         st.header("📋 メニュー")
-        menu = st.radio(
-            "機能を選択",
-            ["🏠 ダッシュボード", "🔗 個別分析", "📊 統計・比較", "⚙️ 設定管理"],
-            index=0
-        )
+        menu_options = ["🏠 ダッシュボード", "🔗 個別分析", "📊 統計・比較", "⚙️ 設定管理"]
+        menu = st.radio("機能を選択", menu_options, index=0)
         
         st.divider()
         st.markdown("**📈 システム状況**")
@@ -466,221 +627,93 @@ def main():
         show_settings()
 
 def show_dashboard():
-    """ダッシュボード表示"""
     st.header("📊 システム全体概要")
-    
-    # 統計情報
-    col1, col2, col3, col4 = st.columns(4)
     
     active_sites = [k for k, v in ANALYZER_CONFIGS.items() if v['status'] == 'active']
     planned_sites = [k for k, v in ANALYZER_CONFIGS.items() if v['status'] == 'planned']
     
-    with col1:
-        st.metric("総サイト数", len(ANALYZER_CONFIGS), delta="16サイト")
-    with col2:
-        st.metric("稼働中", len(active_sites), delta=f"+{len(active_sites)}")
-    with col3:
-        st.metric("準備中", len(planned_sites), delta=f"{len(planned_sites)}サイト")
-    with col4:
-        st.metric("本日の分析", 0, delta="0回")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: st.metric("総サイト数", len(ANALYZER_CONFIGS))
+    with col2: st.metric("稼働中", len(active_sites))
+    with col3: st.metric("準備中", len(planned_sites))
+    with col4: st.metric("本日の分析", 0)
     
     st.divider()
-    
-    # サイト一覧カード表示
     st.subheader("🔗 分析対象サイト一覧")
     
-    # 3列レイアウトでカード表示
     cols = st.columns(3)
-    
-    for i, (site_key, config) in enumerate(ANALYZER_CONFIGS.items()):
-        col_idx = i % 3
-        
-        with cols[col_idx]:
-            # ステータスに応じた色分け
-            if config['status'] == 'active':
-                status_color = "🟢"
-                status_text = "稼働中"
-            elif config['status'] == 'planned':
-                status_color = "🟡" 
-                status_text = "準備中"
-            else:
-                status_color = "🔴"
-                status_text = "停止中"
+    sorted_sites = sorted(ANALYZER_CONFIGS.items(), key=lambda x: (x[1]['status'] != 'active', x[0]))
+
+    for i, (site_key, config) in enumerate(sorted_sites):
+        with cols[i % 3]:
+            status_color = "🟢" if config['status'] == 'active' else "🟡"
+            status_text = "稼働中" if config['status'] == 'active' else "準備中"
             
-            with st.container():
+            with st.container(border=True):
                 st.markdown(f"""
-                <div style="
-                    border: 2px solid {config['color']};
-                    border-radius: 10px;
-                    padding: 15px;
-                    margin: 10px 0;
-                    background: linear-gradient(135deg, {config['color']}15, {config['color']}05);
-                ">
-                    <h4 style="color: {config['color']}; margin: 0 0 10px 0;">
-                        {status_color} {config['name']}
-                    </h4>
-                    <p style="margin: 5px 0; font-size: 0.9em;">
-                        <strong>URL:</strong> {config['url'][:30]}...
-                    </p>
-                    <p style="margin: 5px 0; font-size: 0.9em;">
-                        <strong>ステータス:</strong> {status_text}
-                    </p>
-                    <p style="margin: 5px 0; font-size: 0.8em; color: #666;">
-                        {config['description']}
-                    </p>
-                </div>
+                <h4 style="color: {config['color']}; margin: 0 0 10px 0;">
+                    {status_color} {config['name']}
+                </h4>
+                <p style="margin: 5px 0; font-size: 0.9em;">
+                    <strong>URL:</strong> <a href="{config['url']}" target="_blank">{config['url'][:30]}...</a>
+                </p>
+                <p style="margin: 5px 0; font-size: 0.9em;">
+                    <strong>ステータス:</strong> {status_text}
+                </p>
+                <p style="margin: 5px 0; font-size: 0.8em; color: #666;">
+                    {config['description']}
+                </p>
                 """, unsafe_allow_html=True)
                 
-                # アクションボタン
-                if st.button(f"🚀 {config['name']} 分析実行", key=f"analyze_{site_key}"):
-                    run_analysis(site_key, config)
-                
-                # 保存された結果があれば表示ボタンを追加
-                if f'pages_{site_key}' in st.session_state:
-                    if st.button(f"📊 {config['name']} 結果表示", key=f"show_{site_key}"):
-                        show_analysis_results(site_key)
+                if st.button(f"🚀 分析実行", key=f"dash_analyze_{site_key}", use_container_width=True):
+                    st.session_state.active_analysis = site_key
+                    st.rerun()
+
+    # 分析がトリガーされたら実行
+    if st.session_state.active_analysis:
+        site_key = st.session_state.active_analysis
+        config = ANALYZER_CONFIGS[site_key]
+        st.session_state.active_analysis = None # トリガーをリセット
+        
+        with st.spinner(f"{config['name']}の分析を実行中..."):
+            run_analysis(site_key, config)
 
 def show_individual_analysis():
-    """個別分析画面"""
     st.header("🔗 個別サイト分析")
     
-    # サイト選択
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        selected_site = st.selectbox(
-            "分析対象サイトを選択",
-            options=list(ANALYZER_CONFIGS.keys()),
-            format_func=lambda x: f"{ANALYZER_CONFIGS[x]['name']} ({x})"
-        )
-    
-    with col2:
-        st.markdown("**選択サイト情報**")
-        config = ANALYZER_CONFIGS[selected_site]
-        st.info(f"""
-        **名称:** {config['name']}  
-        **URL:** {config['url']}  
-        **ステータス:** {config['status']}  
-        **説明:** {config['description']}
-        """)
-    
-    # 機能説明
-    st.subheader(f"🎯 {config['name']} の専用機能")
-    
-    feature_cols = st.columns(len(config['features']))
-    for i, feature in enumerate(config['features']):
-        with feature_cols[i]:
-            st.markdown(f"""
-            <div style="
-                background: {config['color']}20;
-                border: 1px solid {config['color']};
-                border-radius: 5px;
-                padding: 10px;
-                text-align: center;
-                margin: 5px;
-            ">
-                <strong>{feature}</strong>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.divider()
-    
-    # 分析実行セクション
-    st.subheader("🚀 分析実行")
-    
-    url_input = st.text_input(
-        "分析URL（カスタマイズ可能）",
-        value=config['url'],
-        help="デフォルトURL以外も分析可能です"
+    selected_site = st.selectbox(
+        "分析対象サイトを選択",
+        options=list(ANALYZER_CONFIGS.keys()),
+        format_func=lambda x: f"{ANALYZER_CONFIGS[x]['name']} ({x})"
     )
     
-    col1, col2, col3 = st.columns([2, 1, 1])
+    config = ANALYZER_CONFIGS[selected_site]
     
-    with col1:
-        if st.button(f"🔍 {config['name']} 分析開始", type="primary"):
+    with st.container(border=True):
+        st.subheader(f"🎯 {config['name']} の設定")
+        st.write(f"**URL:** {config['url']}")
+        st.write(f"**ステータス:** {config['status']}")
+        st.write(f"**説明:** {config['description']}")
+        
+        st.write("**専用機能:**")
+        feature_cols = st.columns(len(config['features']))
+        for i, feature in enumerate(config['features']):
+            with feature_cols[i]:
+                st.info(feature)
+
+    st.divider()
+    
+    if st.button(f"🔍 {config['name']} 分析開始", type="primary", use_container_width=True):
+        with st.spinner(f"{config['name']}の分析を実行中..."):
             run_analysis(selected_site, config)
-    
-    with col2:
-        # 保存された結果があれば表示ボタンを追加
-        if f'pages_{selected_site}' in st.session_state:
-            if st.button("📊 結果表示"):
-                show_analysis_results(selected_site)
-        else:
-            if st.button("📊 履歴表示"):
-                st.info("分析履歴機能は準備中です")
-    
-    with col3:
-        if st.button("⚙️ 設定"):
-            st.info("個別設定機能は準備中です")
-    
-    # 保存されたデータがあれば自動表示
-    if f'pages_{selected_site}' in st.session_state:
-        st.divider()
-        show_analysis_results(selected_site)
 
 def show_statistics():
-    """統計・比較画面"""
     st.header("📊 統計・比較分析")
-    
-    st.info("統計・比較機能は各サイトのStreamlit化完了後に実装予定です")
-    
-    # 将来の機能プレビュー
-    st.subheader("🔮 実装予定機能")
-    
-    features = [
-        "📈 全サイト横断統計",
-        "🔄 サイト間比較分析", 
-        "📅 時系列トレンド",
-        "🎯 SEO改善提案",
-        "📊 統合レポート生成",
-        "⚡ リアルタイム監視"
-    ]
-    
-    cols = st.columns(2)
-    for i, feature in enumerate(features):
-        with cols[i % 2]:
-            st.markdown(f"- {feature}")
+    st.info("この機能は現在準備中です。")
 
 def show_settings():
-    """設定管理画面"""
     st.header("⚙️ 設定管理")
-    
-    st.subheader("🔧 システム設定")
-    
-    # 全般設定
-    with st.expander("全般設定", expanded=True):
-        auto_analysis = st.checkbox("自動分析を有効化", value=False)
-        analysis_interval = st.selectbox("分析間隔", ["1時間", "6時間", "12時間", "24時間"])
-        max_concurrent = st.slider("同時実行数", 1, 5, 2)
-    
-    # 通知設定
-    with st.expander("通知設定"):
-        email_notify = st.checkbox("メール通知", value=False)
-        slack_notify = st.checkbox("Slack通知", value=False)
-        if email_notify:
-            email = st.text_input("通知先メールアドレス")
-        if slack_notify:
-            webhook = st.text_input("Slack Webhook URL")
-    
-    # サイト別設定
-    with st.expander("サイト別設定"):
-        for site_key, config in ANALYZER_CONFIGS.items():
-            st.markdown(f"**{config['name']} ({site_key})**")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                enabled = st.checkbox("有効", value=config['status']=='active', key=f"enable_{site_key}")
-            with col2:
-                priority = st.selectbox("優先度", ["高", "中", "低"], key=f"priority_{site_key}")
-            with col3:
-                timeout = st.number_input("タイムアウト(秒)", 10, 300, 60, key=f"timeout_{site_key}")
-            
-            st.divider()
-    
-    # 保存ボタン
-    if st.button("💾 設定を保存", type="primary"):
-        st.success("設定を保存しました！")
-        st.balloons()
+    st.info("この機能は現在準備中です。")
 
 if __name__ == "__main__":
     main()
