@@ -186,17 +186,121 @@ def analyze_step(state):
                 soup = BeautifulSoup(res.text, 'html.parser')
                 if is_noindex_page(soup): continue
 
-                title = (soup.find('h1') or soup.find('title'))
-                title = title.get_text(strip=True) if title else url
-                title = re.sub(r'\s*[|\-].*(crecaeru|クレかえる).*$', '', title, flags=re.IGNORECASE).strip()
+                # ローカル版と同じタイトル抽出
+                title = soup.title.string.strip() if soup.title and soup.title.string else url
+                title = re.sub(r'\s*[|\-]\s*.*(crecaeru|クレかえる|crecaeru|クレカエル).*
+                
+                crawled_count += 1
+                time.sleep(0.3)
+            except Exception as e:
+                log(f"エラー: {url} - {e}")
+        
+        total_urls = len(state['visited']) + len(state['to_visit'])
+        state['progress'] = len(state['visited']) / total_urls if total_urls > 0 else 1
+        state['progress_text'] = f"進捗: {len(state['visited'])} / {total_urls}"
+
+        if not state['to_visit']:
+            log("クロール完了")
+            state['phase'] = 'completed'
+        return state
+
+    return state
+
+def generate_csv(state):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['A_番号', 'B_ページタイトル', 'C_URL', 'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト'])
+    
+    pages = state.get('pages', {})
+    detailed_links = state.get('links', [])
+    if not pages: return output.getvalue()
+
+    # ローカル版と同じロジック：ターゲットURL別にグループ化
+    target_groups = {}
+    for link in detailed_links:
+        target_url = link['target_url']
+        if target_url not in target_groups:
+            target_groups[target_url] = []
+        target_groups[target_url].append(link)
+    
+    # 被リンク数でソート（ローカル版と同じ）
+    sorted_targets = sorted(target_groups.items(), key=lambda x: len(x[1]), reverse=True)
+    
+    # ページ番号マッピング作成（ローカル版と同じ）
+    page_numbers = {}
+    current_page_number = 1
+    
+    # 被リンクありページの番号割り当て
+    for target_url, links_to_target in sorted_targets:
+        target_info = pages.get(target_url, {})
+        target_title = target_info.get('title', target_url)
+        page_key = (target_title, target_url)
+        
+        if page_key not in page_numbers:
+            page_numbers[page_key] = current_page_number
+            current_page_number += 1
+    
+    # 孤立ページの番号割り当て
+    for url, info in pages.items():
+        # 被リンク数を計算
+        inbound_count = sum(1 for link in detailed_links if link['target_url'] == url)
+        if inbound_count == 0:
+            page_key = (info['title'], url)
+            if page_key not in page_numbers:
+                page_numbers[page_key] = current_page_number
+                current_page_number += 1
+    
+    # 被リンクありページの出力
+    for target_url, links_to_target in sorted_targets:
+        target_info = pages.get(target_url, {})
+        target_title = target_info.get('title', target_url)
+        page_key = (target_title, target_url)
+        page_number = page_numbers[page_key]
+        
+        # 各被リンクを1行ずつ出力
+        for link in links_to_target:
+            writer.writerow([
+                page_number,
+                target_title,
+                target_url,
+                link['source_title'],
+                link['source_url'],
+                link['anchor_text']
+            ])
+    
+    # 孤立ページも追加
+    for url, info in pages.items():
+        inbound_count = sum(1 for link in detailed_links if link['target_url'] == url)
+        if inbound_count == 0:
+            page_key = (info['title'], url)
+            page_number = page_numbers[page_key]
+            
+            writer.writerow([
+                page_number,
+                info['title'],
+                url,
+                '',
+                '',
+                ''
+            ])
+            
+    return output.getvalue(), '', title, flags=re.IGNORECASE)
                 state['pages'][url] = {'title': title}
                 
                 for link in extract_links(soup):
-                    norm_link = normalize_url(urljoin(base_url, link['url']))
-                    if norm_link and norm_link.startswith(f"https://{domain}") and is_content(norm_link):
+                    link_url = link['url']
+                    anchor_text = link['anchor_text']
+                    
+                    # 正しいURL結合
+                    if link_url.startswith('http'):
+                        norm_link = normalize_url(link_url)
+                    else:
+                        norm_link = normalize_url(urljoin(base_url, link_url))
+                    
+                    if norm_link and urlparse(norm_link).netloc.replace('www.', '') == domain and is_content(norm_link):
                         state['links'].append({
                             'source_url': url, 'source_title': title,
-                            'target_url': norm_link, 'anchor_text': link['anchor_text']
+                            'target_url': norm_link, 'anchor_text': anchor_text
                         })
                         if norm_link not in state['visited'] and norm_link not in state['to_visit']:
                             state['to_visit'].append(norm_link)
