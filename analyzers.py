@@ -12,18 +12,27 @@ from io import StringIO
 class SiteAnalyzer:
     """
     特定のサイトをクロールし、内部リンク情報を分析してCSV形式の文字列を生成するクラス。
-    Streamlitアプリから直接呼び出されることを想定。
+    （Streamlit Cloudの環境に合わせ、クロール性能を強化した改良版）
     """
     def __init__(self, site_name, streamlit_status_update_callback=None):
-        # 主の管理サイトリスト
+        
+        # ★★★ 修正点①：主が管理する全てのサイトをここに記述してください ★★★
         self.site_definitions = {
+            # 基本の5サイト
             "arigataya": "https://arigataya.co.jp",
             "kau-ru": "https://kau-ru.com",
             "kaitori-life": "https://kaitori-life.com",
             "friendpay": "https://friend-pay.com",
             "crecaeru": "https://crecaeru.com",
-            # --- ここに他の5サイトの情報を追加してください ---
-            # "site6": "https://site6.com",
+            "bicgift": "https://bic-gift.co.jp",
+            # "サイト名7": "https://example-7.com",
+            # "サイト名8": "https://example-8.com",
+            # "サイト名9": "https://example-9.com",
+            # "サイト名10": "https://example-10.com",
+            # "サイト名11": "https://example-11.com",
+            # "サイト名12": "https://example-12.com",
+            # "サイト名13": "https://example-13.com",
+            # "サイト名14": "https://example-14.com",
         }
         
         self.site_name = site_name
@@ -36,22 +45,24 @@ class SiteAnalyzer:
         self.detailed_links = []
         self.domain = urlparse(self.base_url).netloc.replace('www.', '')
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        # より一般的なユーザーエージェントに変更
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+        })
         
-        # StreamlitのUIを更新するためのコールバック関数
         self.st_callback = streamlit_status_update_callback
 
     def _update_status(self, message):
-        """StreamlitのUIに進捗状況を送信する"""
         if self.st_callback:
             self.st_callback(message)
         else:
-            print(message, file=sys.stderr) # Streamlit環境外でのフォールバック
+            print(message, file=sys.stderr)
 
     def extract_from_sitemap(self, url):
         urls = set()
         try:
-            res = self.session.get(url, timeout=10)
+            # ★★★ 修正点②：タイムアウト時間を延長 ★★★
+            res = self.session.get(url, timeout=20)
             res.raise_for_status()
             soup = BeautifulSoup(res.content, 'xml')
             locs = soup.find_all('loc')
@@ -74,6 +85,7 @@ class SiteAnalyzer:
         return list(set([self.normalize_url(self.base_url)] + sitemap_urls))
 
     def is_content(self, url):
+        # (この部分は変更なし)
         normalized_url = self.normalize_url(url)
         path = urlparse(normalized_url).path.lower().split('?')[0].rstrip('/')
         exclude_patterns = [
@@ -94,23 +106,38 @@ class SiteAnalyzer:
         except Exception:
             return False
 
+    # ★★★ 修正点③：主のオリジナルに近づけた、より強力なリンク抽出ロジック ★★★
     def extract_links(self, soup, page_url):
-        selectors = ['.post_content', '.entry-content', '.article-content', 'main']
-        content_area = soup.body
+        selectors = [
+            '.post_content', '.entry-content', '.article-content', 
+            'main .content', '[class*="content"]', 'main', 'article'
+        ]
+        
+        content_area = None
         for selector in selectors:
             area = soup.select_one(selector)
             if area:
                 content_area = area
                 break
         
+        if not content_area:
+            content_area = soup.body # フォールバック
+
+        # 除外要素を先に削除する（主のオリジナルの優れたロジックを再現）
+        for exclude in content_area.select('header, footer, nav, aside, .sidebar, .widget, .share, .related, .popular-posts, .breadcrumb, .author-box, .navigation'):
+            exclude.decompose()
+
         links = []
+        # 通常のaタグ
         for link in content_area.find_all('a', href=True):
             href = link['href']
-            if href:
+            # javascript:void(0) などを除外
+            if href and not href.lower().startswith('javascript:'):
                 full_url = urljoin(page_url, href)
-                anchor_text = link.get_text(strip=True) or '[リンク]'
+                anchor_text = link.get_text(strip=True) or link.get('title', '') or '[リンク]'
                 links.append({'url': full_url, 'anchor_text': anchor_text[:100]})
         
+        # onclick属性
         for element in content_area.find_all(attrs={'onclick': True}):
             onclick_attr = element.get('onclick', '')
             match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", onclick_attr)
@@ -119,6 +146,7 @@ class SiteAnalyzer:
                 full_url = urljoin(page_url, url)
                 anchor_text = element.get_text(strip=True) or '[onclick]'
                 links.append({'url': full_url, 'anchor_text': anchor_text[:100]})
+                
         return links
 
     def normalize_url(self, url):
@@ -139,7 +167,9 @@ class SiteAnalyzer:
         visited = set()
         to_visit = self.generate_seed_urls()
         processed_links = set()
-        crawl_limit = 500
+        
+        # ★★★ 修正点④：クロール上限を拡大 ★★★
+        crawl_limit = 800
         count = 0
 
         while to_visit and count < crawl_limit:
@@ -149,7 +179,8 @@ class SiteAnalyzer:
                 continue
 
             try:
-                response = self.session.get(url, timeout=10)
+                # ★★★ 修正点⑤：タイムアウト時間を延長 ★★★
+                response = self.session.get(url, timeout=20)
                 if response.status_code != 200: continue
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -179,15 +210,19 @@ class SiteAnalyzer:
 
                 visited.add(normalized_url)
                 count += 1
-                self._update_status(f"  - クロール完了 ({count}/{len(visited)}): {url[:70]}...")
-                time.sleep(0.05) # Streamlit Cloudのリソースを考慮
+                self._update_status(f"  - クロール完了 ({count}/{crawl_limit}): {url[:70]}...")
+                # クラウド環境での負荷を考慮した待機時間
+                time.sleep(0.1)
 
+            except requests.exceptions.RequestException as e:
+                self._update_status(f"  - ネットワークエラー: {url[:70]}... - {e}")
+                continue
             except Exception as e:
-                self._update_status(f"  - エラー: {url[:70]}... - {e}")
+                self._update_status(f"  - 不明なエラー: {url[:70]}... - {e}")
                 continue
 
         for url in self.pages:
-            self.pages[url]['inbound_links'] = sum(1 for _, tgt in self.links if tgt == url)
+            pages[url]['inbound_links'] = sum(1 for _, tgt in self.links if tgt == url)
 
         self._update_status(f"\n分析完了: {len(self.pages)}ページ, {len(self.links)}リンクを検出。CSVを生成します。")
         return self.get_csv_string()
