@@ -34,8 +34,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# サイト設定
+# サイト設定（元の13サイト全て）
 SITES_CONFIG = {
+    "Answer現金化": {
+        "base_url": "https://answer-genkinka.com",
+        "module_name": "answer"
+    },
     "ありがたや": {
         "base_url": "https://arigataya.co.jp",
         "module_name": "arigataya"
@@ -44,21 +48,49 @@ SITES_CONFIG = {
         "base_url": "https://bic-gift.co.jp", 
         "module_name": "bicgift"
     },
-    "カウール": {
-        "base_url": "https://kau-ru.com",
-        "module_name": "kauru"
+    "クレかえる": {
+        "base_url": "https://kurekaeru.jp",
+        "module_name": "crecaeru"
     },
-    "買取LIFE": {
-        "base_url": "https://kaitori-life.com",
-        "module_name": "kaitori_life"
+    "ファミペイ": {
+        "base_url": "https://flashpay-famipay.com",
+        "module_name": "flashpay_famipay"
+    },
+    "メディア": {
+        "base_url": "https://flashpay-media.com",
+        "module_name": "flashpay_media"
     },
     "フレンドペイ": {
         "base_url": "https://friendpay.me",
         "module_name": "friendpay"
     },
-    "クレかえる": {
-        "base_url": "https://kurekaeru.jp",
-        "module_name": "crecaeru"
+    "不用品回収隊": {
+        "base_url": "https://fuyouhin-kaishuu.com",
+        "module_name": "fuyouhin"
+    },
+    "買取LIFE": {
+        "base_url": "https://kaitori-life.com",
+        "module_name": "kaitori_life"
+    },
+    "カウール": {
+        "base_url": "https://kau-ru.com",
+        "module_name": "kau_ru"
+    },
+    "MorePay": {
+        "base_url": "https://morepay.jp",
+        "module_name": "morepay"
+    },
+    "ペイフル": {
+        "base_url": "https://payful.jp",
+        "module_name": "payful"
+    },
+    "スマートペイ": {
+        "base_url": "https://smartpay-gift.com",
+        "module_name": "smart"
+    },
+    "XGIFT": {
+        "base_url": "https://xgift.jp",
+        "module_name": "xgift"
     }
 }
 
