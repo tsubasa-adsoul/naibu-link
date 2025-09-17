@@ -1,4 +1,4 @@
-# main.py （最終完成版・UI/進捗表示 完璧版）
+# main.py （最終完成版・結果保持機能 完璧版）
 
 import streamlit as st
 import pandas as pd
@@ -59,12 +59,9 @@ def run_analysis_loop():
     state = st.session_state.analysis_state
     site_name = state['site_name']
     
-    st.info(f"「{site_name}」の分析を実行中...")
-    
-    # ★★★ ここが最重要修正点 ★★★
-    # 進捗表示用の場所を確保し、最初に空の要素を表示しておく
-    progress_placeholder = st.empty()
+    st.info(f"「{site_name}」の分析を実行中... (フェーズ: {state.get('phase', 'unknown')})")
     log_placeholder = st.empty()
+    progress_placeholder = st.empty()
     progress_placeholder.progress(0, text="分析準備中...")
     log_placeholder.code("ログ待機中...", language="log")
     
@@ -76,14 +73,12 @@ def run_analysis_loop():
             
             state = site_module.analyze_step(state)
             
-            # 状態を保存してからUIを更新
-            st.session_state.analysis_state = state
-            
             log_placeholder.code('\n'.join(state.get('log', [])), language="log")
             if 'progress' in state:
                 progress_placeholder.progress(state['progress'], text=state.get('progress_text', ''))
             
-            time.sleep(1) # サーバー負荷とUI更新のための適切な待機
+            st.session_state.analysis_state = state
+            time.sleep(1)
         except Exception as e:
             st.error(f"分析中に致命的なエラーが発生しました: {e}")
             st.exception(e)
@@ -122,7 +117,9 @@ def main():
         source_options = ["CSVファイルをアップロード"]
         if site_names: source_options.insert(0, "オンラインで新規分析を実行")
         
-        analysis_source = st.radio("データソースを選択", source_options, key="analysis_source", on_change=lambda: st.session_state.pop('analysis_state', None))
+        # ★★★ ここが最重要修正点 ★★★
+        # 諸悪の根源であった on_change を完全に削除
+        analysis_source = st.radio("データソースを選択", source_options, key="analysis_source")
         
         uploaded_file = None
         if analysis_source == "オンラインで新規分析を実行" and site_names:
@@ -130,6 +127,9 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🚀 分析開始/再開"):
+                    # 以前の分析結果をクリアしてから新しい分析を開始
+                    if 'last_analyzed_csv_data' in st.session_state:
+                        del st.session_state['last_analyzed_csv_data']
                     if st.session_state.analysis_state.get('site_name') != selected_site_name:
                         st.session_state.analysis_state = {'site_name': selected_site_name, 'phase': 'initializing'}
                     st.session_state.analysis_state['running'] = True
@@ -160,6 +160,9 @@ def main():
     if uploaded_file:
         data_source = uploaded_file
         filename_for_detect = uploaded_file.name
+        # CSVをアップロードしたら、過去のオンライン分析結果はクリアする
+        if 'last_analyzed_csv_data' in st.session_state:
+            del st.session_state['last_analyzed_csv_data']
     elif 'last_analyzed_csv_data' in st.session_state:
         data_source = StringIO(st.session_state['last_analyzed_csv_data'])
         filename_for_detect = st.session_state['last_analyzed_filename']
@@ -192,23 +195,17 @@ def main():
         pages_df['被リンク数'] = pages_df['C_URL'].map(inbound_counts).fillna(0).astype(int)
         pages_df = pages_df.sort_values('被リンク数', ascending=False).reset_index(drop=True)
 
-        with tab1:
-            st.dataframe(df)
-
+        with tab1: st.dataframe(df)
         with tab2:
             st.header("🏛️ ピラーページ分析")
             st.dataframe(pages_df[['B_ページタイトル', 'C_URL', '被リンク数']], use_container_width=True)
             fig = px.bar(pages_df.head(20).sort_values('被リンク数'), x='被リンク数', y='B_ページタイトル', orientation='h', title="被リンク数 TOP20")
             st.plotly_chart(fig, use_container_width=True)
-
         with tab3:
             st.header("🧩 クラスター分析（アンカーテキスト）")
             anchor_counts = Counter(df[df['F_被リンク元ページアンカーテキスト'] != '']['F_被リンク元ページアンカーテキスト'])
-            if anchor_counts:
-                st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
-            else:
-                st.warning("アンカーテキストデータがありません。")
-
+            if anchor_counts: st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
+            else: st.warning("アンカーテキストデータがありません。")
         with tab4:
             st.header("📈 ネットワーク図")
             # (ネットワーク図のロジックは変更なし)
