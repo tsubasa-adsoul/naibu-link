@@ -136,6 +136,7 @@ def main():
         if analysis_source == "オンラインで新規分析を実行" and HAS_ANALYZER:
             st.subheader("分析対象サイト")
             try:
+                # analyzers.pyからサイトリストを取得
                 temp_analyzer = SiteAnalyzer("arigataya")
                 available_sites = list(temp_analyzer.site_definitions.keys())
                 selected_site = st.selectbox("サイトを選択してください", options=available_sites)
@@ -143,12 +144,13 @@ def main():
                 if st.button("🚀 分析を実行する", key="run_online_analysis"):
                     st.session_state['analysis_in_progress'] = True
                     st.session_state['selected_site_for_analysis'] = selected_site
-                    st.experimental_rerun()
+                    # ★★★ 修正点 ★★★
+                    st.rerun()
             except Exception as e:
                 st.error(f"分析モジュールの初期化に失敗: {e}")
                 st.warning("`analyzers.py`がリポジトリに存在することを確認してください。")
 
-        else:
+        else: # CSVアップロードの場合
             uploaded_file = st.file_uploader("CSVファイルをアップロード", type=['csv'])
         
         st.header("🛠️ 分析設定")
@@ -157,6 +159,7 @@ def main():
     if st.session_state.get('analysis_in_progress'):
         site_to_analyze = st.session_state['selected_site_for_analysis']
         st.info(f"「{site_to_analyze}」のオンライン分析を実行中です。これには数分かかることがあります...")
+        
         log_placeholder = st.empty()
         logs = []
         def update_status_in_streamlit(message):
@@ -166,14 +169,17 @@ def main():
         try:
             analyzer = SiteAnalyzer(site_to_analyze, streamlit_status_update_callback=update_status_in_streamlit)
             csv_data_string = analyzer.run_analysis()
+            
             st.session_state['last_analyzed_csv_data'] = csv_data_string
             st.session_state['last_analyzed_filename'] = f"{site_to_analyze}_analysis.csv"
             st.success("分析が完了しました。結果を表示します。")
+            
         except Exception as e:
             st.error(f"分析中にエラーが発生しました: {e}")
         
         st.session_state['analysis_in_progress'] = False
-        st.experimental_rerun()
+        # ★★★ 修正点 ★★★
+        st.rerun()
         return
 
     data_source = None
@@ -267,7 +273,6 @@ def main():
                 try:
                     edges_df = df[(df['E_被リンク元ページURL'] != "") & (df['C_URL'] != "")].copy()
                     
-                    # 上位N件のURLと、それらにリンクしているURLをノード対象とする
                     top_n_urls = set(pages_df.head(network_top_n)['C_URL'])
                     source_urls_to_top_n = set(edges_df[edges_df['C_URL'].isin(top_n_urls)]['E_被リンク元ページURL'])
                     relevant_urls = top_n_urls.union(source_urls_to_top_n)
@@ -292,7 +297,6 @@ def main():
                         for _, r in agg.iterrows():
                             net.add_edge(r['E_被リンク元ページURL'], r['C_URL'], value=r['weight'])
                         
-                        # `st.components.v1.html` は notebook=True では動作しないことがあるため、ファイルに書き出す
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp:
                             net.save_graph(tmp.name)
                             with open(tmp.name, 'r', encoding='utf-8') as f:
@@ -313,14 +317,11 @@ def main():
             if st.button("📥 総合レポートをダウンロード", key="download_summary"):
                 zip_buffer = BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    # ピラーページ
                     rows = [[i+1, r['B_ページタイトル'], r['C_URL'], r['被リンク数']] for i, r in pages_df.iterrows()]
                     zf.writestr("1_pillar_report.html", generate_html_table(f"{site_name} ピラーページ", ["#", "タイトル", "URL", "被リンク数"], rows))
-                    # アンカー
                     if anchor_counts:
                         rows = [[i+1, a, c] for i, (a,c) in enumerate(anchor_counts.most_common())]
                         zf.writestr("2_anchor_report.html", generate_html_table(f"{site_name} アンカーテキスト", ["#", "アンカー", "頻度"], rows))
-                    # 孤立記事
                     if not isolated_pages.empty:
                         rows = [[i+1, r['B_ページタイトル'], r['C_URL']] for i, r in isolated_pages.iterrows()]
                         zf.writestr("3_isolated_report.html", generate_html_table(f"{site_name} 孤立記事", ["#", "タイトル", "URL"], rows))
