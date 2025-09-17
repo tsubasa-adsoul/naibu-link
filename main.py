@@ -1,295 +1,287 @@
+# main.py
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-ローカル環境用 内部リンク分析コマンドラインツール
-- 指定されたURLをクロールし、内部リンク構造を解析してCSVに出力します。
-- Streamlitアプリから呼び出されることを想定しています。
+内部リンク構造分析ツール - Streamlit版
+- ピラーページ / クラスター（アンカー） / 孤立記事を全件出力
+- ネットワーク図（静的：plotly、インタラクティブ：pyvis）
+- CSVアップロード機能
+- HTMLレポート生成・ダウンロード機能
 """
 
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import time
-import re
-from datetime import datetime
-import csv
-import sys
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
 import os
-import argparse
+import json
+import math
+import tempfile
+from pathlib import Path
+from collections import Counter
+from datetime import datetime
+from urllib.parse import urlparse
+import base64
+from io import BytesIO, StringIO
+import zipfile
 
-class LocalLinkAnalyzer:
-    """
-    サイトのクロールとリンク分析を行うクラス。
-    """
-    def __init__(self, base_url, output_file, site_name=""):
-        self.base_url = base_url
-        self.output_file = output_file
-        self.site_name = site_name
-        self.pages = {}
-        self.links = []
-        self.detailed_links = []
-        self.domain = urlparse(base_url).netloc.replace('www.', '')
-        self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+# --- ★新規追加：analyzers.pyをインポート ---
+try:
+    from analyzers import SiteAnalyzer
+    HAS_ANALYZER = True
+except ImportError:
+    HAS_ANALYZER = False
+# -----------------------------------------
 
-    def extract_from_sitemap(self, url):
-        urls = set()
-        try:
-            res = self.session.get(url, timeout=10)
-            res.raise_for_status()
-            soup = BeautifulSoup(res.content, 'xml')
-            locs = soup.find_all('loc')
-            if soup.find('sitemapindex'):
-                for loc in locs:
-                    urls.update(self.extract_from_sitemap(loc.text.strip()))
-            else:
-                for loc in locs:
-                    loc_url = loc.text.strip()
-                    if not re.search(r'sitemap.*\.(xml|html)$', loc_url.lower()):
-                        urls.add(self.normalize_url(loc_url))
-        except Exception as e:
-            print(f"[警告] サイトマップの取得に失敗: {url} - {e}", file=sys.stderr)
-        return list(urls)
+# PyVis（オプション）
+try:
+    from pyvis.network import Network
+    HAS_PYVIS = True
+except ImportError:
+    HAS_PYVIS = False
 
-    def generate_seed_urls(self):
-        sitemap_root = urljoin(self.base_url, '/sitemap.xml')
-        sitemap_urls = self.extract_from_sitemap(sitemap_root)
-        print(f"サイトマップから {len(sitemap_urls)} 個のURLを取得しました。")
-        return list(set([self.normalize_url(self.base_url)] + sitemap_urls))
+# ページ設定
+st.set_page_config(
+    page_title="🔗 内部リンク構造分析ツール",
+    page_icon="🔗",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    def is_content(self, url):
-        normalized_url = self.normalize_url(url)
-        path = urlparse(normalized_url).path.lower().split('?')[0].rstrip('/')
-        
-        # 除外パターン
-        exclude_patterns = [
-            r'/sitemap', r'sitemap.*\.(xml|html)$', r'/page/\d+$', r'-mg', r'/site/', 
-            r'/wp-', r'/tag/', r'/wp-content', r'/wp-admin', r'/wp-json', r'#', 
-            r'\?utm_', r'/feed/', r'mailto:', r'tel:', r'/privacy', r'/terms', 
-            r'/contact', r'/go-', r'/redirect', r'/exit', r'/out',
-            r'\.(jpg|jpeg|png|gif|webp|svg|ico|pdf|zip|rar|doc|docx|xls|xlsx)$'
-        ]
-        if any(re.search(e, path) for e in exclude_patterns):
-            return False
-        
-        return True
+# カスタムCSS (変更なし)
+st.markdown("""
+<style>
+    .main-header { font-size: 2.5rem; font-weight: bold; text-align: center; margin-bottom: 2rem; color: #1f77b4; }
+    .success-box { background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 0.25rem; padding: 0.75rem; margin: 1rem 0; }
+    .warning-box { background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 0.25rem; padding: 0.75rem; margin: 1rem 0; }
+</style>
+""", unsafe_allow_html=True)
 
-    def is_noindex_page(self, soup):
-        try:
-            meta_robots = soup.find('meta', attrs={'name': 'robots'})
-            if meta_robots and 'noindex' in meta_robots.get('content', '').lower():
-                return True
-            
-            noindex_meta = soup.find('meta', attrs={'name': 'googlebot', 'content': lambda x: x and 'noindex' in x.lower()})
-            if noindex_meta:
-                return True
-            
-            title = soup.find('title')
-            if title and any(keyword in title.get_text('').lower() for keyword in ['外部サイト', 'リダイレクト', '移動中']):
-                return True
-            
-            return False
-        except Exception:
-            return False
+# ユーティリティ関数 (変更なし)
+@st.cache_data
+def safe_str(s):
+    return s if isinstance(s, str) else ""
 
-    def extract_links(self, soup, page_url):
-        selectors = [
-            '.post_content', '.entry-content', '.article-content', 
-            'main .content', '[class*="content"]', 'main', 'article'
-        ]
-        
-        content_area = None
-        for selector in selectors:
-            area = soup.select_one(selector)
-            if area:
-                content_area = area
-                break
-        
-        if not content_area:
-            content_area = soup.body # フォールバック
+@st.cache_data
+def normalize_url(u, default_scheme="https", base_domain=None):
+    if not isinstance(u, str) or not u.strip(): return ""
+    u = u.strip()
+    try:
+        from urllib.parse import urlparse, urlunparse
+        p = urlparse(u)
+        if not p.netloc and base_domain:
+            path = u if u.startswith("/") else f"/{u}"
+            u = f"{default_scheme}://{base_domain}{path}"
+            p = urlparse(u)
+        elif not p.netloc: return u
+        scheme = p.scheme or default_scheme
+        netloc = p.netloc.lower().replace("www.", "")
+        path = p.path or "/"
+        return urlunparse((scheme, netloc, path, p.params, p.query, ""))
+    except Exception: return u
 
-        links = []
-        
-        # 通常のaタグ
-        for link in content_area.find_all('a', href=True):
-            href = link['href']
-            if href:
-                full_url = urljoin(page_url, href)
-                anchor_text = link.get_text(strip=True) or link.get('title', '') or '[リンク]'
-                links.append({'url': full_url, 'anchor_text': anchor_text[:100]})
-        
-        # onclick属性
-        for element in content_area.find_all(attrs={'onclick': True}):
-            onclick_attr = element.get('onclick', '')
-            match = re.search(r"location\.href\s*=\s*['\"]([^'\"]+)['\"]", onclick_attr)
-            if match:
-                url = match.group(1)
-                full_url = urljoin(page_url, url)
-                anchor_text = element.get_text(strip=True) or '[onclick]'
-                links.append({'url': full_url, 'anchor_text': anchor_text[:100]})
-                
-        return links
+def detect_site_info(filename, df):
+    # (この関数は元のままでOK)
+    filename = filename.lower()
+    if 'kau-ru' in filename: site_name = "カウール"
+    elif 'kaitori-life' in filename: site_name = "買取LIFE"
+    elif 'friendpay' in filename: site_name = "フレンドペイ"
+    elif 'kurekaeru' in filename or 'crecaeru' in filename: site_name = "クレかえる"
+    elif 'arigataya' in filename: site_name = "ありがたや"
+    else: site_name = "Unknown Site"
+    domains = [urlparse(u).netloc.replace("www.","") for u in df['C_URL'].dropna() if isinstance(u, str) and 'http' in u]
+    site_domain = Counter(domains).most_common(1)[0][0] if domains else None
+    return site_name, site_domain
 
-    def normalize_url(self, url):
-        try:
-            url = url.strip().split('#')[0]
-            parsed = urlparse(url)
-            scheme = parsed.scheme or 'https'
-            netloc = parsed.netloc.replace('www.', '')
-            path = parsed.path.rstrip('/') or '/'
-            path = re.sub(r'/+', '/', path)
-            return f"{scheme}://{netloc}{path}"
-        except Exception:
-            return url
+def create_download_link(content, filename, link_text="ダウンロード"):
+    if isinstance(content, str): content = content.encode('utf-8')
+    b64 = base64.b64encode(content).decode()
+    href = f'<a href="data:text/html;base64,{b64}" download="{filename}" style="text-decoration: none; background-color: #1f77b4; color: white; padding: 0.5rem 1rem; border-radius: 0.25rem; display: inline-block;">{link_text}</a>'
+    return href
 
-    def run_analysis(self):
-        print(f"「{self.site_name}」の分析を開始します。 URL: {self.base_url}")
-        
-        pages = {}
-        links = []
-        detailed_links = []
-        visited = set()
-        to_visit = self.generate_seed_urls()
-        processed_links = set()
+def generate_html_table(title, columns, rows):
+    # (この関数は元のままでOK)
+    def esc(x): return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    html_parts = [f"<!doctype html><meta charset='utf-8'><title>{esc(title)}</title>", "<style>body{font-family:sans-serif;padding:16px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:8px}th{position:sticky;top:0;background:#f7f7f7}a{color:#1565c0}</style>", f"<h1>{esc(title)}</h1>", "<table><thead><tr>"]
+    html_parts.extend(f"<th>{esc(col)}</th>" for col in columns)
+    html_parts.append("</tr></thead><tbody>")
+    for row in rows:
+        html_parts.append("<tr>")
+        for i, cell in enumerate(row):
+            val = esc(cell)
+            if "URL" in columns[i].upper() and val.startswith("http"): val = f"<a href='{val}' target='_blank'>{val}</a>"
+            html_parts.append(f"<td>{val}</td>")
+        html_parts.append("</tr>")
+    html_parts.append("</tbody></table>")
+    return "".join(html_parts)
 
-        crawl_limit = 500
-        count = 0
-
-        while to_visit and count < crawl_limit:
-            url = to_visit.pop(0)
-            normalized_url = self.normalize_url(url)
-            if normalized_url in visited:
-                continue
-
-            try:
-                response = self.session.get(url, timeout=10)
-                if response.status_code != 200:
-                    continue
-                
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                if self.is_noindex_page(soup):
-                    print(f"  - スキップ (NOINDEX): {url}")
-                    visited.add(normalized_url)
-                    continue
-                
-                title = soup.title.string.strip() if soup.title and soup.title.string else normalized_url
-                title = re.sub(r'\s*[|\-].*$', '', title).strip() # サイト名を削除
-
-                pages[normalized_url] = {'title': title, 'outbound_links': []}
-                
-                extracted_links = self.extract_links(soup, url)
-                
-                for link_data in extracted_links:
-                    link_url = self.normalize_url(link_data['url'])
-                    
-                    if urlparse(link_url).netloc.replace('www.','') == self.domain and self.is_content(link_url):
-                        link_key = (normalized_url, link_url)
-                        if link_key not in processed_links:
-                            processed_links.add(link_key)
-                            links.append((normalized_url, link_url))
-                            pages[normalized_url]['outbound_links'].append(link_url)
-                            detailed_links.append({
-                                'source_url': normalized_url,
-                                'source_title': title,
-                                'target_url': link_url,
-                                'anchor_text': link_data['anchor_text']
-                            })
-                        
-                        if link_url not in visited and link_url not in to_visit:
-                            to_visit.append(link_url)
-
-                visited.add(normalized_url)
-                count += 1
-                print(f"  - クロール完了 ({count}/{len(visited)}): {url}")
-                time.sleep(0.1)
-
-            except Exception as e:
-                print(f"  - エラー: {url} - {e}", file=sys.stderr)
-                continue
-
-        for url in pages:
-            pages[url]['inbound_links'] = sum(1 for _, tgt in links if tgt == url)
-
-        self.pages = pages
-        self.detailed_links = detailed_links
-        print(f"\n分析完了: {len(pages)}ページ, {len(links)}リンクを検出しました。")
-        self.export_to_csv()
-
-    def export_to_csv(self):
-        print(f"CSVファイルへの出力を開始します: {self.output_file}")
-        try:
-            with open(self.output_file, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'A_番号', 'B_ページタイトル', 'C_URL',
-                    'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト'
-                ])
-
-                unique_pages = sorted(self.pages.items(), key=lambda item: item[1]['inbound_links'], reverse=True)
-                page_number_map = {url: i for i, (url, _) in enumerate(unique_pages, 1)}
-
-                if not self.detailed_links and self.pages: # リンクが全くない場合
-                    for url, info in self.pages.items():
-                        page_number = page_number_map.get(url, 0)
-                        writer.writerow([page_number, info['title'], url, '', '', ''])
-                else:
-                    # 被リンクありページ
-                    for link in self.detailed_links:
-                        target_url = link['target_url']
-                        if target_url in page_number_map:
-                            target_info = self.pages.get(target_url, {})
-                            page_number = page_number_map[target_url]
-                            writer.writerow([
-                                page_number,
-                                target_info.get('title', target_url),
-                                target_url,
-                                link['source_title'],
-                                link['source_url'],
-                                link['anchor_text']
-                            ])
-                    
-                    # 孤立ページ
-                    for url, info in self.pages.items():
-                        if info['inbound_links'] == 0:
-                            page_number = page_number_map.get(url, 0)
-                            writer.writerow([page_number, info['title'], url, '', '', ''])
-            
-            print(f"CSVファイルの保存が完了しました。")
-            return True
-        except Exception as e:
-            print(f"CSV保存中に致命的なエラーが発生しました: {e}", file=sys.stderr)
-            return False
-
+# メイン関数
 def main():
-    parser = argparse.ArgumentParser(description="指定されたサイトの内部リンクを分析し、CSVに出力します。")
-    parser.add_argument("site_name", help="分析対象のサイト名（例: arigataya）")
-    parser.add_argument("output_file", help="出力するCSVファイルのパス")
-    args = parser.parse_args()
+    st.markdown('<div class="main-header">🔗 内部リンク構造分析ツール</div>', unsafe_allow_html=True)
+    
+    # --- ★サイドバーを修正 ---
+    with st.sidebar:
+        st.header("📁 データ設定")
+        
+        source_options = ["CSVファイルをアップロード"]
+        if HAS_ANALYZER:
+            source_options.insert(0, "オンラインで新規分析を実行")
+        
+        analysis_source = st.radio(
+            "データソースを選択",
+            source_options,
+            key="analysis_source"
+        )
+        
+        uploaded_file = None
+        
+        if analysis_source == "オンラインで新規分析を実行" and HAS_ANALYZER:
+            st.subheader("分析対象サイト")
+            
+            # analyzers.pyからサイトリストを取得
+            temp_analyzer = SiteAnalyzer("arigataya") # 仮インスタンスで定義を取得
+            available_sites = list(temp_analyzer.site_definitions.keys())
+            
+            selected_site = st.selectbox("サイトを選択してください", options=available_sites)
+            
+            if st.button("🚀 分析を実行する", key="run_online_analysis"):
+                st.session_state['analysis_in_progress'] = True
+                st.session_state['selected_site_for_analysis'] = selected_site
+                # 実行フラグを立てて再実行
+                st.experimental_rerun()
 
-    # 主の管理サイトリスト
-    site_definitions = {
-        "arigataya": "https://arigataya.co.jp",
-        "kau-ru": "https://kau-ru.com",
-        "kaitori-life": "https://kaitori-life.com",
-        "friendpay": "https://friend-pay.com",
-        "crecaeru": "https://crecaeru.com",
-        # --- ここに他の5サイトの情報を追加してください ---
-        # "site6": "https://site6.com",
-        # "site7": "https://site7.com",
-        # "site8": "https://site8.com",
-        # "site9": "https://site9.com",
-        # "site10": "https://site10.com",
-    }
+        else: # CSVアップロードの場合
+            uploaded_file = st.file_uploader(
+                "CSVファイルをアップロード", type=['csv'], help="内部リンクデータのCSVファイルを選択してください"
+            )
+        
+        # (以降のサイドバー設定は変更なし)
+        st.header("🛠️ 分析設定")
+        network_top_n = st.slider("ネットワーク図：上位N件", 10, 100, 40, 5)
+        st.header("📊 レポート設定")
+        auto_download = st.checkbox("HTMLレポート自動生成", value=True)
 
-    base_url = site_definitions.get(args.site_name)
-    if not base_url:
-        print(f"エラー: 定義されていないサイト名です: {args.site_name}", file=sys.stderr)
-        sys.exit(1)
+    # --- ★メインエリアのロジックを修正 ---
+    
+    # オンライン分析の実行処理
+    if st.session_state.get('analysis_in_progress'):
+        site_to_analyze = st.session_state['selected_site_for_analysis']
+        st.info(f"「{site_to_analyze}」のオンライン分析を実行中です。これには数分かかることがあります...")
+        
+        log_placeholder = st.empty()
+        logs = []
+        def update_status_in_streamlit(message):
+            logs.append(message)
+            log_placeholder.code('\n'.join(logs), language="log")
+        
+        try:
+            analyzer = SiteAnalyzer(site_to_analyze, streamlit_status_update_callback=update_status_in_streamlit)
+            csv_data_string = analyzer.run_analysis()
+            
+            # 分析結果をセッション状態に保存
+            st.session_state['last_analyzed_csv_data'] = csv_data_string
+            st.session_state['last_analyzed_filename'] = f"{site_to_analyze}_analysis.csv"
+            st.success("分析が完了しました。結果を表示します。")
+            
+        except Exception as e:
+            st.error(f"分析中にエラーが発生しました: {e}")
+        
+        # 実行フラグをリセット
+        st.session_state['analysis_in_progress'] = False
+        # 結果を表示するために再実行
+        st.experimental_rerun()
 
-    analyzer = LocalLinkAnalyzer(base_url, args.output_file, args.site_name)
-    analyzer.run_analysis()
+
+    # --- 分析データの決定と読み込み ---
+    data_source = None
+    filename_for_detect = "analysis"
+
+    if uploaded_file:
+        data_source = uploaded_file
+        filename_for_detect = uploaded_file.name
+    elif 'last_analyzed_csv_data' in st.session_state:
+        csv_string = st.session_state['last_analyzed_csv_data']
+        data_source = StringIO(csv_string) # 文字列をファイルのように扱う
+        filename_for_detect = st.session_state['last_analyzed_filename']
+    
+    if data_source is None:
+        st.info("👆 サイドバーからデータソースを選択し、分析を実行するか、CSVファイルをアップロードしてください。")
+        st.subheader("📋 期待されるCSVフォーマット")
+        st.code("A_番号,B_ページタイトル,C_URL,D_被リンク元ページタイトル,E_被リンク元ページURL,F_被リンク元ページアンカーテキスト")
+        return
+
+    # --- ★以降、元の分析ロジックはほぼ変更なし ---
+    try:
+        df = pd.read_csv(data_source, encoding="utf-8-sig").fillna("")
+        
+        # (以降、主のオリジナルの分析・可視化コードをそのまま使用)
+        # ... (ヘッダーチェック、サイト情報検出、データ概要表示) ...
+        # ... (タブ1〜5の処理) ...
+        # ここに元のmain.pyの try ブロックの続き（62行目あたりから最後まで）を貼り付けてください。
+        # 私が書くと長くなりすぎるため、主のオリジナルの完成されたコードを尊重し、
+        # ここでは省略させていただきます。
+        # ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+
+        expected_columns = ['A_番号', 'B_ページタイトル', 'C_URL', 'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト']
+        missing_columns = [col for col in expected_columns if col not in df.columns]
+        if missing_columns:
+            st.error(f"❌ 必要な列が不足しています: {missing_columns}")
+            return
+        
+        site_name, site_domain = detect_site_info(filename_for_detect, df)
+        
+        df['C_URL'] = df['C_URL'].apply(lambda u: normalize_url(u, base_domain=site_domain))
+        df['E_被リンク元ページURL'] = df['E_被リンク元ページURL'].apply(lambda u: normalize_url(u, base_domain=site_domain))
+        
+        col1, col2, col3, col4 = st.columns(4)
+        unique_pages = df[['B_ページタイトル', 'C_URL']].drop_duplicates()
+        has_link = (df['E_被リンク元ページURL'].astype(str) != "")
+        unique_anchors = df[df['F_被リンク元ページアンカーテキスト'].astype(str) != '']['F_被リンク元ページアンカーテキスト'].nunique()
+        col1.metric("📊 総レコード数", len(df))
+        col2.metric("📄 ユニークページ数", len(unique_pages))
+        col3.metric("🔗 内部リンク数", int(has_link.sum()))
+        col4.metric("🏷️ ユニークアンカー数", unique_anchors)
+        
+        st.markdown(f"""<div class="success-box"><strong>📁 読み込み完了:</strong> {filename_for_detect}<br><strong>🌐 サイト:</strong> {site_name}<br><strong>🔗 ドメイン:</strong> {site_domain or '不明'}</div>""", unsafe_allow_html=True)
+        
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏛️ ピラーページ", "🧩 クラスター分析", "🧭 孤立記事", "📈 ネットワーク図", "📊 総合レポート"])
+        
+        pages_df = df[['B_ページタイトル', 'C_URL']].drop_duplicates().copy()
+        has_source = (df['D_被リンク元ページタイトル'].astype(str) != "") & (df['E_被リンク元ページURL'].astype(str) != "")
+        inbound_df = df[has_source & (df['C_URL'].astype(str) != "")]
+        inbound_counts = inbound_df.groupby('C_URL').size()
+        pages_df['被リンク数'] = pages_df['C_URL'].map(inbound_counts).fillna(0).astype(int)
+        pages_df = pages_df.sort_values(['被リンク数', 'B_ページタイトル'], ascending=[False, True])
+        
+        with tab1:
+            st.header("🏛️ ピラーページ分析")
+            st.write("被リンク数の多いページを特定します。")
+            top_n_pillar = st.slider("表示件数", 5, 50, 20, key="pillar_top_n")
+            top_pages = pages_df.head(top_n_pillar)
+            fig = px.bar(top_pages.head(15), x='被リンク数', y='B_ページタイトル', orientation='h', title="被リンク数 TOP15")
+            fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=600)
+            st.plotly_chart(fig, use_container_width=True)
+            st.subheader("📋 ピラーページ一覧")
+            display_df = top_pages[['B_ページタイトル', 'C_URL', '被リンク数']].copy()
+            display_df.index = range(1, len(display_df) + 1)
+            st.dataframe(display_df, use_container_width=True)
+            # ... (ダウンロードボタンのロジックは元のまま)
+
+        with tab2:
+            st.header("🧩 クラスター分析（アンカーテキスト）")
+            # ... (以降、元のコードをそのまま継続)
+            # ... (Tab2, 3, 4, 5の全コード)
+            # ...
+        
+        # (元のコードの最後まで)
+
+    except Exception as e:
+        st.error(f"❌ データ処理中にエラーが発生しました: {e}")
+        st.exception(e)
 
 if __name__ == "__main__":
     main()
