@@ -1,4 +1,4 @@
-# main.py (真の最終・完成版)
+ main.py (最終・完成版 v3)
 
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,6 @@ import numpy as np
 import os
 
 st.set_page_config(page_title="🔗 内部リンク構造分析ツール", layout="wide")
-
 st.markdown("""<style>.main-header { font-size: 2.5rem; font-weight: bold; text-align: center; margin-bottom: 2rem; color: #1f77b4; }</style>""", unsafe_allow_html=True)
 
 @st.cache_data
@@ -55,7 +54,7 @@ def run_analysis_loop():
     log_placeholder = st.empty()
     progress_placeholder = st.empty()
     
-    while state.get('running') and state.get('phase') != 'completed':
+    while state.get('running') and state.get('phase') != 'completed' and state.get('phase') != 'error':
         try:
             spec = importlib.util.spec_from_file_location(site_name, f"{site_name}.py")
             site_module = importlib.util.module_from_spec(spec)
@@ -68,11 +67,12 @@ def run_analysis_loop():
                 progress_placeholder.progress(state['progress'], text=state.get('progress_text', ''))
             
             st.session_state.analysis_state = state
-            time.sleep(1) # クラウドへの負荷を考慮
+            time.sleep(1)
         except Exception as e:
             st.error(f"分析中に致命的なエラーが発生しました: {e}")
             st.exception(e)
             state['running'] = False
+            state['phase'] = 'error'
             st.session_state.analysis_state = state
             break
 
@@ -100,12 +100,10 @@ def main():
         try:
             site_files = sorted([f for f in os.listdir('.') if f.startswith('auto_') and f.endswith('.py')])
             site_names = [os.path.splitext(f)[0] for f in site_files]
-        except:
-            site_files, site_names = [], []
+        except: site_files, site_names = [], []
 
         source_options = ["CSVファイルをアップロード"]
-        if site_names:
-            source_options.insert(0, "オンラインで新規分析を実行")
+        if site_names: source_options.insert(0, "オンラインで新規分析を実行")
         
         analysis_source = st.radio("データソースを選択", source_options, key="analysis_source", on_change=lambda: st.session_state.pop('analysis_state', None))
         
@@ -116,7 +114,7 @@ def main():
             with col1:
                 if st.button("🚀 分析開始/再開"):
                     if st.session_state.analysis_state.get('site_name') != selected_site_name:
-                        st.session_state.analysis_state = {'site_name': selected_site_name, 'phase': 'initializing', 'log': []}
+                        st.session_state.analysis_state = {'site_name': selected_site_name, 'phase': 'initializing'}
                     st.session_state.analysis_state['running'] = True
                     st.rerun()
             with col2:
@@ -144,7 +142,12 @@ def main():
         return
 
     try:
+        # ★★★ ここが最重要修正点 ★★★
         df = pd.read_csv(data_source, encoding="utf-8-sig", header=0).fillna("")
+        if df.empty:
+            st.warning("分析結果が0件でした。クロールが正常に行われなかった可能性があります。")
+            return
+
         df.columns = ['A_番号', 'B_ページタイトル', 'C_URL', 'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト']
         df['A_番号'] = df.groupby('C_URL')['A_番号'].transform('first')
         df['A_番号'] = pd.to_numeric(df['A_番号'], errors='coerce').fillna(0).astype(int)
@@ -162,7 +165,7 @@ def main():
             st.dataframe(df)
 
         pages_df = df[['B_ページタイトル', 'C_URL']].drop_duplicates().copy()
-        inbound_counts = df.groupby('C_URL').size()
+        inbound_counts = df[df['D_被リンク元ページタイトル'] != ''].groupby('C_URL').size()
         pages_df['被リンク数'] = pages_df['C_URL'].map(inbound_counts).fillna(0).astype(int)
         pages_df = pages_df.sort_values('被リンク数', ascending=False).reset_index(drop=True)
 
@@ -174,7 +177,7 @@ def main():
 
         with tab3:
             st.header("🧩 クラスター分析（アンカーテキスト）")
-            anchor_counts = Counter(df['F_被リンク元ページアンカーテキスト'].dropna())
+            anchor_counts = Counter(df['F_被リンク元ページアンカーテキスト'].replace('', np.nan).dropna())
             if anchor_counts:
                 st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
             else:
