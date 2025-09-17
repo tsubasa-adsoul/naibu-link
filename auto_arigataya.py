@@ -1,4 +1,4 @@
-# auto_arigataya.py （最終調整版・本文リンク重視）
+# auto_arigataya.py （最終完成版・本文リンク重視）
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,20 +26,33 @@ def analyze_step(state):
             return f"https://{netloc}{path}"
         except: return ""
 
+    # ★★★ ここが最終調整点 ★★★
     def is_content(url):
+        """クロール対象を、主のローカル版の意図に合わせ、より厳格に判定する"""
         try:
             path = urlparse(url).path.lower()
-            if any(re.search(p, path) for p in [r'^/category/', r'^/[a-z0-9\-]+/?$', r'^/$']): return True
+            
+            # 許可する明確なパターン（末尾のスラッシュはあってもなくても良い）
+            allow_patterns = [
+                r'^/$',                                  # トップページ
+                r'^/[a-z0-9\-]+/?$',                     # ルート直下の記事ページ
+                r'^/category/[a-z0-9\-]+/?$',            # カテゴリページ
+                r'^/category/[a-z0-9\-]+/page/\d+/?$'    # カテゴリのページネーション
+            ]
+            
+            # 上記の許可パターンのいずれかに完全に一致する場合のみTrue
+            if any(re.fullmatch(p, path) for p in allow_patterns):
+                return True
+
             return False
-        except: return False
+        except:
+            return False
 
     def is_noindex_page(soup):
         return soup.find('meta', attrs={'name': 'robots', 'content': re.compile(r'noindex', re.I)})
 
-    # ★★★ ここが最重要修正点 ★★★
     def extract_links(soup, base_url):
         links = []
-        # 本文エリアのセレクタを定義
         selectors = ['.post_content', '.entry-content', 'main .article']
         content_area = None
         for selector in selectors:
@@ -48,12 +61,10 @@ def analyze_step(state):
                 log(f"  -> 本文エリア発見: '{selector}'")
                 break
         
-        # もし本文エリアが見つからなければ、リンクは抽出しない
         if not content_area:
             log("  -> 警告: 本文エリアが見つからず、リンクを抽出しませんでした。")
             return []
 
-        # 本文エリア内の不要な部分を除外
         for exclude in content_area.select('header, footer, nav, aside, .sidebar, .widget, .share, .related, .popular-posts, .breadcrumb, .author-box, .navigation'):
             exclude.decompose()
             
@@ -85,6 +96,10 @@ def analyze_step(state):
         except Exception as e:
             log(f"サイトマップ解析エラー: {sitemap_url} - {e}")
         return urls
+        
+    def is_internal(url, domain):
+        try: return urlparse(url).netloc.replace('www.', '') == domain.replace('www.', '')
+        except: return False
 
     if state['phase'] == 'initializing':
         log("フェーズ1: 記事URLの収集を開始します。")
