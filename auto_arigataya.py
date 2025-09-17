@@ -1,4 +1,4 @@
-# auto_arigataya.py (真の最終・完成版 v2)
+# auto_arigataya.py (真の最終・完成版 v3)
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,18 +18,23 @@ def analyze_step(state):
     def normalize_url(url, base_url):
         if not isinstance(url, str): return ""
         try:
-            url = urljoin(base_url, url.strip())
-            parsed = urlparse(url)
+            # urljoinで相対パスを絶対パスに変換
+            full_url = urljoin(base_url, url.strip())
+            parsed = urlparse(full_url)
             netloc = parsed.netloc.lower().replace('www.', '')
             path = parsed.path.rstrip('/')
             if not path: path = '/'
             return f"https://{netloc}{path}"
-        except: return ""
+        except:
+            return ""
 
     def is_content(url):
-        path = urlparse(url).path.lower()
-        if any(re.search(p, path) for p in [r'^/category/', r'^/[a-z0-9\-]+/?$', r'^/$']): return True
-        return False
+        try:
+            path = urlparse(url).path.lower()
+            if any(re.search(p, path) for p in [r'^/category/', r'^/[a-z0-9\-]+/?$', r'^/$']): return True
+            return False
+        except:
+            return False
 
     def is_noindex_page(soup):
         return soup.find('meta', attrs={'name': 'robots', 'content': re.compile(r'noindex', re.I)})
@@ -41,26 +46,61 @@ def analyze_step(state):
             exclude.decompose()
         for a in content_area.find_all('a', href=True):
             links.append({'url': a['href'], 'anchor_text': a.get_text(strip=True) or a.get('title', '')})
+        for element in content_area.find_all(attrs={'onclick': True}):
+            match = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", element.get('onclick', ''))
+            if match:
+                links.append({'url': match.group(1), 'anchor_text': element.get_text(strip=True) or '[onclick]'})
         return links
+
+    # ★★★ 主のロジックを完全に再現したサイトマップ解析関数 ★★★
+    def extract_from_sitemap_recursively(sitemap_url, session):
+        urls = set()
+        try:
+            res = session.get(sitemap_url, timeout=20)
+            if not res.ok: return urls
+            
+            soup = BeautifulSoup(res.content, 'lxml') # lxmlを明示的に使用
+            
+            # サイトマップインデックスの場合、再帰的に潜る
+            sitemap_indexes = soup.find_all('sitemap')
+            if sitemap_indexes:
+                log(f"  -> サイトマップインデックス発見: {sitemap_url}")
+                for sitemap in sitemap_indexes:
+                    loc = sitemap.find('loc')
+                    if loc:
+                        urls.update(extract_from_sitemap_recursively(loc.text.strip(), session))
+            
+            # 通常のサイトマップの場合
+            url_tags = soup.find_all('url')
+            for url_tag in url_tags:
+                loc = url_tag.find('loc')
+                if loc:
+                    urls.add(loc.text.strip())
+        except Exception as e:
+            log(f"サイトマップ解析エラー: {sitemap_url} - {e}")
+        return urls
 
     if state['phase'] == 'initializing':
         log("フェーズ1: 記事URLの収集を開始します。")
         try:
             base_url = "https://arigataya.co.jp"
             session = requests.Session()
-            session.headers.update({'User-Agent': 'Mozilla/5.0'})
-            sitemap_urls = set([base_url])
-            res = session.get(urljoin(base_url, '/sitemap.xml'), timeout=20)
-            if res.ok:
-                soup = BeautifulSoup(res.content, 'xml')
-                for loc in soup.find_all('loc'): sitemap_urls.add(loc.text.strip())
-
+            session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            
+            sitemap_urls = extract_from_sitemap_recursively(urljoin(base_url, '/sitemap.xml'), session)
+            
+            initial_urls = list(set([base_url] + list(sitemap_urls)))
+            
             state.update({
                 'session': session, 'base_url': base_url, 'domain': urlparse(base_url).netloc.lower().replace('www.', ''),
-                'to_visit': [u for u in sitemap_urls if is_content(u)], 'visited': set(),
-                'pages': {}, 'links': [], 'phase': 'crawling'
+                'to_visit': [u for u in initial_urls if is_content(u)],
+                'visited': set(), 'pages': {}, 'links': [], 'phase': 'crawling', 'crawl_limit': 800
             })
             log(f"シードURLを{len(state['to_visit'])}件発見。クロールを開始します。")
+            if not state['to_visit']:
+                log("警告: クロール対象のURLが見つかりませんでした。")
+                state['phase'] = 'error'
+
         except Exception as e:
             log(f"初期化エラー: {e}")
             state['phase'] = 'error'
@@ -118,30 +158,20 @@ def generate_csv(state):
     writer = csv.writer(output, lineterminator='\n')
     writer.writerow(['番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'])
     
-    pages = state['pages']
-    links = state['links']
+    pages = state.get('pages', {})
+    links = state.get('links', [])
     
-    # ★★★ ここが最重要修正点 ★★★
-    # 孤立記事も必ずCSVに出力されるように、ロジックを根本から見直しました。
-    
-    # まず、全ページの情報をpages辞書に確定させる
-    for link in links:
-        if link['target_url'] not in pages:
-            pages[link['target_url']] = {'title': link['target_url']} # タイトル不明でも追加
-    
-    # 被リンク情報を集計
+    if not pages:
+        return output.getvalue()
+
     page_inlinks = {url: [] for url in pages}
     for link in links:
         if link['target_url'] in page_inlinks:
             page_inlinks[link['target_url']].append(link)
 
-    # 被リンク数でソート
     sorted_pages = sorted(pages.keys(), key=lambda url: len(page_inlinks.get(url, [])), reverse=True)
-    
-    # 番号付け
     page_numbers = {url: i+1 for i, url in enumerate(sorted_pages)}
 
-    # CSV書き出し
     for url in sorted_pages:
         page_num = page_numbers[url]
         title = pages[url]['title']
@@ -151,7 +181,6 @@ def generate_csv(state):
             for link in inlinks:
                 writer.writerow([page_num, title, url, link['source_title'], link['source_url'], link['anchor_text']])
         else:
-            # 被リンクがない場合（孤立記事）も必ず出力
             writer.writerow([page_num, title, url, '', '', ''])
             
     return output.getvalue()
