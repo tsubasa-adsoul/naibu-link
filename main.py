@@ -9,56 +9,26 @@
 - 分析結果を元のダッシュボードで可視化します。
 """
 
+# main.py （クラウド完全対応・分割実行制御版）
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import numpy as np
 import os
-import json
-import math
-import tempfile
-from pathlib import Path
-from collections import Counter
-from datetime import datetime
+import importlib.util
+from io import StringIO
 from urllib.parse import urlparse, urlunparse
-import base64
-from io import BytesIO, StringIO
-import zipfile
-import importlib.util # ★司令塔機能のための重要ライブラリ
+from collections import Counter
+import numpy as np
 
-# PyVis（オプション）
-try:
-    from pyvis.network import Network
-    HAS_PYVIS = True
-except ImportError:
-    HAS_PYVIS = False
+# --- ページ設定など（変更なし） ---
+st.set_page_config(page_title="🔗 内部リンク構造分析ツール", layout="wide")
+st.markdown("""<style> .main-header { font-size: 2.5rem; font-weight: bold; text-align: center; margin-bottom: 2rem; color: #1f77b4; } </style>""", unsafe_allow_html=True)
 
-# ページ設定
-st.set_page_config(
-    page_title="🔗 内部リンク構造分析ツール",
-    page_icon="🔗",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# カスタムCSS
-st.markdown("""
-<style>
-    .main-header { font-size: 2.5rem; font-weight: bold; text-align: center; margin-bottom: 2rem; color: #1f77b4; }
-    .success-box { background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 0.25rem; padding: 0.75rem; margin: 1rem 0; }
-    .warning-box { background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 0.25rem; padding: 0.75rem; margin: 1rem 0; }
-</style>
-""", unsafe_allow_html=True)
-
-# ユーティリティ関数
-@st.cache_data
-def safe_str(s):
-    return s if isinstance(s, str) else ""
-
+# --- ユーティリティ関数（変更なし） ---
 @st.cache_data
 def normalize_url(u, default_scheme="https", base_domain=None):
+    # ... (変更なし)
     if not isinstance(u, str) or not u.strip(): return ""
     u = u.strip()
     try:
@@ -75,11 +45,12 @@ def normalize_url(u, default_scheme="https", base_domain=None):
     except Exception: return u
 
 def detect_site_info(filename, df):
+    # ... (変更なし)
     filename = filename.lower()
     site_name_map = {
         'auto_answer': "Answer現金化", 'auto_arigataya': "ありがたや", 'auto_bicgift': "ビックギフト",
-        'auto_crecaeru': "クレかえる", 'auto_flashpay_famipay': "ファミペイ（FlashPay）", 
-        'auto_flashpay_media': "メディア（FlashPay）", 'auto_friendpay': "フレンドペイ",
+        'auto_crecaeru': "クレかえる", 'auto_flashpay_famipay': "ファミペイ", 
+        'auto_flashpay_media': "メディア", 'auto_friendpay': "フレンドペイ",
         'auto_fuyouhin': "不用品回収隊", 'auto_kaitori_life': "買取LIFE", 'auto_kau_ru': "カウール",
         'auto_morepay': "MorePay", 'auto_payful': "ペイフル", 'auto_smart': "スマートペイ", 'auto_xgift': "XGIFT"
     }
@@ -88,31 +59,17 @@ def detect_site_info(filename, df):
         if key in filename:
             site_name = name
             break
-    
     domains = [urlparse(u).netloc.replace("www.","") for u in df['C_URL'].dropna() if isinstance(u, str) and 'http' in u]
     site_domain = Counter(domains).most_common(1)[0][0] if domains else None
     return site_name, site_domain
 
-def generate_html_table(title, columns, rows):
-    def esc(x): return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    html = f"<!doctype html><meta charset='utf-8'><title>{esc(title)}</title>"
-    html += "<style>body{font-family:sans-serif;padding:16px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:8px;font-size:14px}th{position:sticky;top:0;background:#f7f7f7}a{color:#1565c0;text-decoration:none}a:hover{text-decoration:underline}</style>"
-    html += f"<h1>{esc(title)}</h1><table><thead><tr>{''.join(f'<th>{esc(c)}</th>' for c in columns)}</tr></thead><tbody>"
-    for row in rows:
-        html += "<tr>"
-        for i, cell in enumerate(row):
-            val = esc(cell)
-            if "URL" in columns[i].upper() and val.startswith("http"):
-                val = f"<a href='{val}' target='_blank'>{val}</a>"
-            html += f"<td>{val}</td>"
-        html += "</tr>"
-    html += "</tbody></table>"
-    return html
-
-# メイン関数
 def main():
     st.markdown('<div class="main-header">🔗 内部リンク構造分析ツール</div>', unsafe_allow_html=True)
     
+    # セッション状態の初期化
+    if 'analysis_state' not in st.session_state:
+        st.session_state.analysis_state = {}
+
     with st.sidebar:
         st.header("📁 データ設定")
         
@@ -134,46 +91,79 @@ def main():
             st.subheader("分析対象サイト")
             selected_site_name = st.selectbox("サイトを選択してください", options=site_names)
             
-            if st.button("🚀 分析を実行する", key="run_online_analysis"):
-                st.session_state['analysis_in_progress'] = True
-                st.session_state['selected_site_for_analysis'] = selected_site_name
-                st.rerun()
+            # ★★★ 分割実行のための新しいボタン構成 ★★★
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🚀 分析開始/再開", key="run_analysis"):
+                    # 新しい分析を開始する場合、状態をリセット
+                    if st.session_state.analysis_state.get('site_name') != selected_site_name:
+                        st.session_state.analysis_state = {
+                            'site_name': selected_site_name,
+                            'phase': 'initializing',
+                            'log': [f"「{selected_site_name}」の分析準備を開始します..."],
+                            'to_visit': [],
+                            'visited': set(),
+                            'pages': {},
+                            'processed_links': set(),
+                            'links': [],
+                            'detailed_links': []
+                        }
+                    st.session_state.analysis_state['running'] = True
+                    st.rerun()
+            with col2:
+                if st.button("⏹️ 中断/リセット"):
+                    st.session_state.analysis_state = {}
+                    st.rerun()
         else:
             uploaded_file = st.file_uploader("CSVファイルをアップロード", type=['csv'])
+
+    # --- ★★★ 分割実行のメインループ ★★★ ---
+    if st.session_state.analysis_state.get('running'):
+        state = st.session_state.analysis_state
+        site_name = state['site_name']
         
-        st.header("🛠️ 分析設定")
-        network_top_n = st.slider("ネットワーク図：上位N件", 10, 100, 40, 5, help="ネットワーク図に表示する上位ページ数")
-        
-    if st.session_state.get('analysis_in_progress'):
-        site_name_to_run = st.session_state['selected_site_for_analysis']
-        st.info(f"「{site_name_to_run}」の専用分析プログラムを実行中です...")
-        
+        st.info(f"「{site_name}」の分析を実行中... (フェーズ: {state['phase']})")
         log_placeholder = st.empty()
-        logs = []
-        def update_status_in_streamlit(message):
-            logs.append(message)
-            log_placeholder.code('\n'.join(logs), language="log")
-        
+        progress_placeholder = st.empty()
+
         try:
-            spec = importlib.util.spec_from_file_location(site_name_to_run, f"{site_name_to_run}.py")
+            # 司令塔が分析モジュールを呼び出す
+            spec = importlib.util.spec_from_file_location(site_name, f"{site_name}.py")
             site_module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(site_module)
             
-            csv_data_string = site_module.analyze(update_status_in_streamlit)
+            # 分析モジュールのanalyze関数に、現在の状態(state)を渡して処理を依頼
+            new_state = site_module.analyze_step(state)
             
-            st.session_state['last_analyzed_csv_data'] = csv_data_string
-            st.session_state['last_analyzed_filename'] = f"{site_name_to_run}_analysis.csv"
-            st.success("分析が完了しました。結果を表示します。")
+            # 分析モジュールから返された新しい状態でセッションを更新
+            st.session_state.analysis_state = new_state
             
-        except Exception as e:
-            st.error(f"分析中にエラーが発生しました: {e}")
-            st.exception(e)
-        
-        st.session_state['analysis_in_progress'] = False
-        st.rerun()
-        return
+            # ログとプログレスバーを更新
+            log_placeholder.code('\n'.join(new_state['log']), language="log")
+            if 'progress' in new_state:
+                progress_placeholder.progress(new_state['progress'], text=new_state.get('progress_text', ''))
+            
+            # 'completed'フェーズに達したら、実行を停止し、結果を整形
+            if new_state['phase'] == 'completed':
+                st.session_state.analysis_state['running'] = False
+                st.success("分析が完了しました。結果を生成します。")
+                
+                # 最終的なCSV文字列を生成
+                csv_string = site_module.generate_csv(new_state)
+                st.session_state['last_analyzed_csv_data'] = csv_string
+                st.session_state['last_analyzed_filename'] = f"{site_name}_analysis.csv"
+                st.rerun()
+            else:
+                # まだ途中なら、少し待ってから再実行を促す
+                time.sleep(0.5) # クラウドへの負荷軽減
+                st.rerun()
 
-    data_source = None
+        except Exception as e:
+            st.error(f"分析中に致命的なエラーが発生しました: {e}")
+            st.exception(e)
+            st.session_state.analysis_state['running'] = False
+        
+        return # 分析中はダッシュボードを表示しない
     filename_for_detect = "analysis"
     if uploaded_file:
         data_source = uploaded_file
