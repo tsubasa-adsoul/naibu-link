@@ -1,3 +1,5 @@
+# main.py （真の最終完成版・全機能統合 v2）
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -8,10 +10,22 @@ from urllib.parse import urlparse, urlunparse
 from collections import Counter
 import numpy as np
 import os
+import math
+import tempfile
 
+# PyVis（オプション）
+try:
+    from pyvis.network import Network
+    HAS_PYVIS = True
+except ImportError:
+    HAS_PYVIS = False
+
+# ページ設定とCSS
 st.set_page_config(page_title="🔗 内部リンク構造分析ツール", layout="wide")
 st.markdown("""<style>.main-header { font-size: 2.5rem; font-weight: bold; text-align: center; margin-bottom: 2rem; color: #1f77b4; }</style>""", unsafe_allow_html=True)
+st.markdown("""<style>.success-box { background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 0.25rem; padding: 0.75rem; margin: 1rem 0; }</style>""", unsafe_allow_html=True)
 
+# --- ユーティリティ関数 ---
 @st.cache_data
 def normalize_url_for_display(u, base_domain=None):
     if not isinstance(u, str) or not u.strip(): return ""
@@ -35,16 +49,14 @@ def detect_site_info(filename, df):
         'auto_fuyouhin': "不用品回収隊", 'auto_kaitori_life': "買取LIFE", 'auto_kau_ru': "カウール",
         'auto_morepay': "MorePay", 'auto_payful': "ペイフル", 'auto_smart': "スマートペイ", 'auto_xgift': "XGIFT"
     }
-    site_name = "Unknown Site"
-    for key in site_name_map:
-        if key in filename:
-            site_name = site_name_map[key]
-            break
+    site_name = next((name for key, name in site_name_map.items() if key in filename), "Unknown Site")
     domains = [urlparse(u).netloc.replace("www.","") for u in df['C_URL'].dropna() if isinstance(u, str) and 'http' in u]
     site_domain = Counter(domains).most_common(1)[0][0] if domains else None
     return site_name, site_domain
 
+# --- 分析実行ループ ---
 def run_analysis_loop():
+    # (この関数は変更なし)
     state = st.session_state.analysis_state
     site_name = state['site_name']
     
@@ -87,6 +99,7 @@ def run_analysis_loop():
         st.session_state['last_analyzed_filename'] = f"{site_name}_analysis.csv"
         st.rerun()
 
+# --- メイン関数 ---
 def main():
     st.markdown('<div class="main-header">🔗 内部リンク構造分析ツール</div>', unsafe_allow_html=True)
     
@@ -121,6 +134,9 @@ def main():
                     st.rerun()
         else:
             uploaded_file = st.file_uploader("CSVファイルをアップロード", type=['csv'])
+        
+        st.header("🛠️ 分析設定")
+        network_top_n = st.slider("ネットワーク図：上位N件", 10, 100, 40, 5, help="ネットワーク図に表示する上位ページ数")
 
     if st.session_state.analysis_state.get('running'):
         run_analysis_loop()
@@ -140,13 +156,13 @@ def main():
         return
 
     try:
-        # ★★★ ここが最重要修正点 ★★★
-        df = pd.read_csv(data_source, encoding="utf-8-sig", header=0).fillna("")
+        df = pd.read_csv(data_source, encoding="utf-8-sig", header=0)
         if df.empty:
-            st.warning("分析結果が0件でした。クロールが正常に行われなかった可能性があります。")
+            st.warning("分析結果が0件でした。クロールが正常に行われなかったか、対象ページが存在しない可能性があります。")
             return
 
         df.columns = ['A_番号', 'B_ページタイトル', 'C_URL', 'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト']
+        df = df.fillna('')
         df['A_番号'] = df.groupby('C_URL')['A_番号'].transform('first')
         df['A_番号'] = pd.to_numeric(df['A_番号'], errors='coerce').fillna(0).astype(int)
         
@@ -154,18 +170,18 @@ def main():
         df['C_URL'] = df['C_URL'].apply(lambda u: normalize_url_for_display(u, base_domain=site_domain))
         df['E_被リンク元ページURL'] = df['E_被リンク元ページURL'].apply(lambda u: normalize_url_for_display(u, base_domain=site_domain))
         
-        # --- ここから主のダッシュボード機能 ---
         st.markdown(f"### {site_name} の分析結果")
         
-        tab1, tab2, tab3 = st.tabs(["📊 データ一覧", "🏛️ ピラーページ", "🧩 クラスター分析"])
+        # ★★★ タブ構成を完全に復元 ★★★
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 データ一覧", "🏛️ ピラーページ", "🧩 クラスター分析", "📈 ネットワーク図"])
         
-        with tab1:
-            st.dataframe(df)
-
         pages_df = df[['B_ページタイトル', 'C_URL']].drop_duplicates().copy()
         inbound_counts = df[df['D_被リンク元ページタイトル'] != ''].groupby('C_URL').size()
         pages_df['被リンク数'] = pages_df['C_URL'].map(inbound_counts).fillna(0).astype(int)
         pages_df = pages_df.sort_values('被リンク数', ascending=False).reset_index(drop=True)
+
+        with tab1:
+            st.dataframe(df)
 
         with tab2:
             st.header("🏛️ ピラーページ分析")
@@ -175,11 +191,47 @@ def main():
 
         with tab3:
             st.header("🧩 クラスター分析（アンカーテキスト）")
-            anchor_counts = Counter(df['F_被リンク元ページアンカーテキスト'].replace('', np.nan).dropna())
+            anchor_counts = Counter(df[df['F_被リンク元ページアンカーテキスト'] != '']['F_被リンク元ページアンカーテキスト'])
             if anchor_counts:
                 st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
             else:
                 st.warning("アンカーテキストデータがありません。")
+
+        # ★★★ ネットワーク図機能を完全に復元 ★★★
+        with tab4:
+            st.header("📈 ネットワーク図")
+            if not HAS_PYVIS:
+                st.error("❌ pyvisライブラリが必要です。`pip install pyvis`でインストールしてください。")
+            else:
+                st.info("🔄 インタラクティブネットワーク図を生成中...")
+                try:
+                    edges_df = df[(df['E_被リンク元ページURL'] != "") & (df['C_URL'] != "")].copy()
+                    top_n_urls = set(pages_df.head(network_top_n)['C_URL'])
+                    relevant_urls = top_n_urls.union(set(edges_df[edges_df['C_URL'].isin(top_n_urls)]['E_被リンク元ページURL']))
+                    sub_edges = edges_df[edges_df['C_URL'].isin(relevant_urls) & edges_df['E_被リンク元ページURL'].isin(relevant_urls)]
+                    
+                    if not sub_edges.empty:
+                        agg = sub_edges.groupby(['E_被リンク元ページURL', 'C_URL']).size().reset_index(name='weight')
+                        url_map = pd.concat([df[['C_URL', 'B_ページタイトル']].rename(columns={'C_URL':'url', 'B_ページタイトル':'title'}), df[['E_被リンク元ページURL', 'D_被リンク元ページタイトル']].rename(columns={'E_被リンク元ページURL':'url', 'D_被リンク元ページタイトル':'title'})]).drop_duplicates('url').set_index('url')['title'].to_dict()
+                        
+                        net = Network(height="800px", width="100%", directed=True, notebook=True, cdn_resources='in_line')
+                        net.set_options('{"physics":{"barnesHut":{"gravitationalConstant":-8000,"springLength":150,"avoidOverlap":0.1}}}')
+
+                        nodes = set(agg['E_被リンク元ページURL']).union(set(agg['C_URL']))
+                        for u in nodes:
+                            net.add_node(u, label=str(url_map.get(u, u))[:20], title=url_map.get(u, u), size=10 + math.log2(inbound_counts.get(u, 0) + 1) * 4)
+                        for _, r in agg.iterrows():
+                            net.add_edge(r['E_被リンク元ページURL'], r['C_URL'], value=r['weight'])
+                        
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp:
+                            net.save_graph(tmp.name)
+                            with open(tmp.name, 'r', encoding='utf-8') as f:
+                                st.components.v1.html(f.read(), height=820, scrolling=True)
+                        os.unlink(tmp.name)
+                    else:
+                        st.warning("ネットワークを描画するためのリンクデータが不足しています。")
+                except Exception as e:
+                    st.error(f"❌ ネットワーク図の生成に失敗しました: {e}")
 
     except Exception as e:
         st.error(f"❌ データ処理中にエラーが発生しました: {e}")
