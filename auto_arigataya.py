@@ -1,4 +1,4 @@
-# auto_arigataya.py (真の最終・完成版 v3)
+# auto_arigataya.py （最終調整版・本文リンク重視）
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,32 +18,45 @@ def analyze_step(state):
     def normalize_url(url, base_url):
         if not isinstance(url, str): return ""
         try:
-            # urljoinで相対パスを絶対パスに変換
             full_url = urljoin(base_url, url.strip())
             parsed = urlparse(full_url)
             netloc = parsed.netloc.lower().replace('www.', '')
             path = parsed.path.rstrip('/')
             if not path: path = '/'
             return f"https://{netloc}{path}"
-        except:
-            return ""
+        except: return ""
 
     def is_content(url):
         try:
             path = urlparse(url).path.lower()
             if any(re.search(p, path) for p in [r'^/category/', r'^/[a-z0-9\-]+/?$', r'^/$']): return True
             return False
-        except:
-            return False
+        except: return False
 
     def is_noindex_page(soup):
         return soup.find('meta', attrs={'name': 'robots', 'content': re.compile(r'noindex', re.I)})
 
+    # ★★★ ここが最重要修正点 ★★★
     def extract_links(soup, base_url):
         links = []
-        content_area = soup.select_one('.post_content, .entry-content, main') or soup.body
-        for exclude in content_area.select('header, footer, nav, aside, .sidebar'):
+        # 本文エリアのセレクタを定義
+        selectors = ['.post_content', '.entry-content', 'main .article']
+        content_area = None
+        for selector in selectors:
+            content_area = soup.select_one(selector)
+            if content_area:
+                log(f"  -> 本文エリア発見: '{selector}'")
+                break
+        
+        # もし本文エリアが見つからなければ、リンクは抽出しない
+        if not content_area:
+            log("  -> 警告: 本文エリアが見つからず、リンクを抽出しませんでした。")
+            return []
+
+        # 本文エリア内の不要な部分を除外
+        for exclude in content_area.select('header, footer, nav, aside, .sidebar, .widget, .share, .related, .popular-posts, .breadcrumb, .author-box, .navigation'):
             exclude.decompose()
+            
         for a in content_area.find_all('a', href=True):
             links.append({'url': a['href'], 'anchor_text': a.get_text(strip=True) or a.get('title', '')})
         for element in content_area.find_all(attrs={'onclick': True}):
@@ -52,29 +65,22 @@ def analyze_step(state):
                 links.append({'url': match.group(1), 'anchor_text': element.get_text(strip=True) or '[onclick]'})
         return links
 
-    # ★★★ 主のロジックを完全に再現したサイトマップ解析関数 ★★★
     def extract_from_sitemap_recursively(sitemap_url, session):
         urls = set()
         try:
             res = session.get(sitemap_url, timeout=20)
             if not res.ok: return urls
+            soup = BeautifulSoup(res.content, 'lxml')
             
-            soup = BeautifulSoup(res.content, 'lxml') # lxmlを明示的に使用
-            
-            # サイトマップインデックスの場合、再帰的に潜る
             sitemap_indexes = soup.find_all('sitemap')
             if sitemap_indexes:
-                log(f"  -> サイトマップインデックス発見: {sitemap_url}")
                 for sitemap in sitemap_indexes:
-                    loc = sitemap.find('loc')
-                    if loc:
+                    if loc := sitemap.find('loc'):
                         urls.update(extract_from_sitemap_recursively(loc.text.strip(), session))
             
-            # 通常のサイトマップの場合
             url_tags = soup.find_all('url')
             for url_tag in url_tags:
-                loc = url_tag.find('loc')
-                if loc:
+                if loc := url_tag.find('loc'):
                     urls.add(loc.text.strip())
         except Exception as e:
             log(f"サイトマップ解析エラー: {sitemap_url} - {e}")
@@ -85,10 +91,9 @@ def analyze_step(state):
         try:
             base_url = "https://arigataya.co.jp"
             session = requests.Session()
-            session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            session.headers.update({'User-Agent': 'Mozilla/5.0'})
             
             sitemap_urls = extract_from_sitemap_recursively(urljoin(base_url, '/sitemap.xml'), session)
-            
             initial_urls = list(set([base_url] + list(sitemap_urls)))
             
             state.update({
@@ -100,7 +105,6 @@ def analyze_step(state):
             if not state['to_visit']:
                 log("警告: クロール対象のURLが見つかりませんでした。")
                 state['phase'] = 'error'
-
         except Exception as e:
             log(f"初期化エラー: {e}")
             state['phase'] = 'error'
@@ -160,9 +164,7 @@ def generate_csv(state):
     
     pages = state.get('pages', {})
     links = state.get('links', [])
-    
-    if not pages:
-        return output.getvalue()
+    if not pages: return output.getvalue()
 
     page_inlinks = {url: [] for url in pages}
     for link in links:
