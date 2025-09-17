@@ -1,4 +1,4 @@
-# auto_crecaeru.py （真の最終・完成版・ロジック完全復元）
+# auto_crecaeru.py （真の最終・完成版 v2・ロジック完全復元）
 
 import requests
 from bs4 import BeautifulSoup
@@ -42,7 +42,7 @@ def analyze_step(state):
             if any(re.search(e, path) for e in exclude_patterns):
                 return False
             
-            # 上記以外は基本的に許可する（主のオリジナルの思想）
+            # 上記のいずれでもなければ、許可する（主のオリジナルの思想）
             return True
         except:
             return False
@@ -50,6 +50,8 @@ def analyze_step(state):
     def is_noindex_page(soup):
         return soup.find('meta', attrs={'name': 'robots', 'content': re.compile(r'noindex', re.I)})
 
+    # nonlocal変数を正しく扱うため、analyze_step直下で定義
+    excluded_links_count = state.get('excluded_links_count', 0)
     def extract_links(soup, base_url):
         nonlocal excluded_links_count
         links = []
@@ -85,12 +87,10 @@ def analyze_step(state):
             sitemap_indexes = soup.find_all('sitemap')
             if sitemap_indexes:
                 for sitemap in sitemap_indexes:
-                    if loc := sitemap.find('loc'):
-                        urls.update(extract_from_sitemap_recursively(loc.text.strip(), session))
+                    if loc := sitemap.find('loc'): urls.update(extract_from_sitemap_recursively(loc.text.strip(), session))
             else:
                 for url_tag in soup.find_all('url'):
-                    if loc := url_tag.find('loc'):
-                        urls.add(loc.text.strip())
+                    if loc := url_tag.find('loc'): urls.add(loc.text.strip())
         except Exception as e:
             log(f"サイトマップ解析エラー: {sitemap_url} - {e}")
         return urls
@@ -108,7 +108,7 @@ def analyze_step(state):
             state.update({
                 'session': session, 'base_url': base_url, 'domain': urlparse(base_url).netloc.lower().replace('www.', ''),
                 'to_visit': [u for u in initial_urls if is_content(u, base_url)],
-                'visited': set(), 'pages': {}, 'links': [], 'phase': 'crawling', 'crawl_limit': 800
+                'visited': set(), 'pages': {}, 'links': [], 'phase': 'crawling', 'crawl_limit': 800, 'excluded_links_count': 0
             })
             log(f"シードURLを{len(state['to_visit'])}件発見。クロールを開始します。")
             if not state['to_visit']:
@@ -122,7 +122,6 @@ def analyze_step(state):
     if state['phase'] == 'crawling':
         session, base_url, domain = state['session'], state['base_url'], state['domain']
         crawled_count = 0
-        excluded_links_count = state.get('excluded_links_count', 0)
         
         while state['to_visit'] and crawled_count < 10:
             url = state['to_visit'].pop(0)
@@ -140,13 +139,6 @@ def analyze_step(state):
                 title = (soup.find('h1') or soup.find('title')).get_text(strip=True)
                 title = re.sub(r'\s*\|.*(crecaeru|クレかえる).*$', '', title, flags=re.IGNORECASE).strip()
                 state['pages'][url] = {'title': title}
-                
-                # nonlocal変数を扱うためのトリック
-                nonlocal_vars = {'excluded_links_count': excluded_links_count}
-                def extract_links_wrapper(soup, base_url):
-                    nonlocal_vars['excluded_links_count'] = excluded_links_count
-                    # ... extract_linksのロジック ...
-                    return links
                 
                 for link in extract_links(soup, base_url):
                     norm_link = normalize_url(link['url'], base_url)
