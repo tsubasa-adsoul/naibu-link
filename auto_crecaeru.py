@@ -1,247 +1,159 @@
-# crecaeru.py （改造後）
+# auto_crecaeru.py （クラウド完全対応・汎用版）
 
-# 必要なライブラリのみをインポート
+# main.pyの汎用クロール機能を呼び出すために、必要なライブラリをインポート
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import time
 import re
-import csv
-from io import StringIO
+import pandas as pd
+
+def crawl_site(site_name, base_url, max_pages=200, status_callback=None):
+    """
+    main.pyの思想に基づいた、汎用的なクロール関数。
+    crecaeru特有の処理を追加。
+    """
+    
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+        else:
+            print(msg)
+
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0'})
+    domain = urlparse(base_url).netloc.lower().replace('www.', '')
+
+    # 汎用的なURL判定ロジック
+    def is_content_url(url):
+        try:
+            path = urlparse(url).path.lower()
+            exclude = [r'\.xml', r'/wp-admin/', r'/wp-content/', r'/feed/', r'\.(jpg|png|pdf)$', r'#', r'\?']
+            if any(re.search(p, path) for p in exclude): return False
+            return True
+        except:
+            return False
+
+    # サイトマップからURL収集
+    sitemap_urls = set([base_url])
+    try:
+        res = session.get(urljoin(base_url, '/sitemap.xml'), timeout=20)
+        if res.ok:
+            soup = BeautifulSoup(res.content, 'lxml')
+            for loc in soup.find_all('loc'):
+                sitemap_urls.add(loc.text.strip())
+    except Exception as e:
+        log(f"サイトマップ取得エラー: {e}")
+        
+    to_visit = [u for u in sitemap_urls if is_content_url(u)][:max_pages]
+    log(f"クロール対象URL: {len(to_visit)}件")
+
+    visited = set()
+    pages = {}
+    all_links = []
+    
+    for i, url in enumerate(to_visit):
+        if url in visited: continue
+        
+        try:
+            log(f"クロール中: {i+1}/{len(to_visit)} - {url[:70]}...")
+            
+            res = session.get(url, timeout=15)
+            if not res.ok: continue
+            
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            if soup.find('meta', attrs={'name': 'robots', 'content': re.compile(r'noindex', re.I)}):
+                continue
+                
+            title_tag = soup.find('h1') or soup.find('title')
+            title = title_tag.get_text(strip=True) if title_tag else url
+            title = re.sub(r'\s*[|\-].*$', '', title).strip()
+            
+            pages[url] = {'title': title}
+            
+            # --- crecaeru特有の処理 ---
+            content_area = soup.select_one('.post_content, .entry-content, main') or soup.body
+            # gnavを除外
+            if gnav := content_area.select_one('#gnav.l-header__gnav.c-gnavWrap'):
+                gnav.decompose()
+            # -------------------------
+
+            for a in content_area.find_all('a', href=True):
+                href = a.get('href')
+                if href and not href.startswith('#'):
+                    norm_link = normalize_url(href, base_url)
+                    link_domain = urlparse(norm_link).netloc.lower().replace('www.', '')
+                    if link_domain == domain and is_content_url(norm_link):
+                        all_links.append({
+                            'source_url': url, 'source_title': title,
+                            'target_url': norm_link,
+                            'anchor_text': a.get_text(strip=True) or '[リンク]'
+                        })
+                        if norm_link not in visited and norm_link not in to_visit and len(to_visit) < max_pages:
+                            to_visit.append(norm_link)
+            
+            visited.add(url)
+            time.sleep(0.5)
+            
+        except Exception as e:
+            log(f"エラー: {url} - {e}")
+
+    log("分析データを生成中...")
+    
+    # DataFrameに変換して返す
+    if not all_links:
+        return pd.DataFrame()
+        
+    return pd.DataFrame(all_links)
+
 
 # ★★★ このファイルが呼び出されたときに実行される本体です ★★★
 def analyze(status_callback):
     """
-    crecaeru.co.jp の分析を実行し、結果をCSV文字列で返す関数。
-    主のオリジナルのロジックを、一切変更せずに移植。
+    main.pyの思想に基づき、crecaeruの分析を実行する。
     """
+    config = {
+        "base_url": "https://kurekaeru.jp",
+        "site_name": "クレかえる"
+    }
 
-    # --- 主のオリジナルのコードを、この関数の中にそのまま配置します ---
+    # 汎用クロール関数を呼び出し
+    df_links = crawl_site(config["site_name"], config["base_url"], max_pages=200, status_callback=status_callback)
+
+    if df_links.empty:
+        return "" # 空の文字列を返す
+
+    # main.pyのダッシュボードが要求するCSV形式に変換
     
-    # ページやリンク情報を保存する変数
+    # ページ情報を作成
     pages = {}
-    links = []
-    detailed_links = []
-    excluded_links_count = 0
+    for _, row in df_links.iterrows():
+        pages[row['source_url']] = {'title': row['source_title']}
+        pages[row['target_url']] = {'title': "取得中..."} # 仮置き
 
-    # --- 主のオリジナルの関数群（クロールロジックの心臓部） ---
-    # これらは一切変更いたしません。
+    # 被リンク数を計算
+    target_counts = df_links['target_url'].value_counts().to_dict()
 
-    def normalize_url(url):
-        parsed = urlparse(url)
-        scheme = 'https'
-        netloc = parsed.netloc.replace('www.', '')
-        path = parsed.path.rstrip('/')
-        if '/wp/' in path: path = path.replace('/wp/', '/')
-        path = re.sub(r'/+', '/', path)
-        if path and not path.endswith('/'): path += '/'
-        return f"{scheme}://{netloc}{path}"
-
-    def extract_from_sitemap(url, session):
-        urls = set()
-        try:
-            res = session.get(url, timeout=15)
-            res.raise_for_status()
-            soup = BeautifulSoup(res.content, 'xml')
-            locs = soup.find_all('loc')
-            if soup.find('sitemapindex'):
-                for loc in locs:
-                    urls.update(extract_from_sitemap(loc.text.strip(), session))
-            else:
-                for loc in locs:
-                    loc_url = loc.text.strip()
-                    if not re.search(r'sitemap.*\.(xml|html)$', loc_url.lower()):
-                        urls.add(normalize_url(loc_url))
-        except Exception as e:
-            status_callback(f"[警告] サイトマップ取得失敗: {url} - {e}")
-        return list(urls)
-
-    def generate_seed_urls(base_url, session):
-        sitemap_root = urljoin(base_url, '/sitemap.xml')
-        sitemap_urls = extract_from_sitemap(sitemap_root, session)
-        status_callback(f"サイトマップから {len(sitemap_urls)} 個のURLを取得")
-        return list(set([normalize_url(base_url)] + sitemap_urls))
-
-    def is_content(url):
-        normalized_url = normalize_url(url)
-        path = urlparse(normalized_url).path.lower().split('?')[0].rstrip('/')
-        if any(re.search(p, path) for p in [r'^/category/[a-z0-9\-]+', r'^/category/[a-z0-9\-]+/page/\d+', r'^/[a-z0-9\-]+', r'^/$', r'^$']):
-            return True
-        if any(re.search(e, path) for e in [r'/sitemap', r'sitemap.*\.(xml|html)', r'/page/\d+', r'-mg', r'/site/', r'/wp-', r'/tag/', r'/wp-content', r'/wp-admin', r'/wp-json', r'#', r'\?utm_', r'/feed/', r'mailto:', r'tel:', r'/privacy', r'/terms', r'/contact', r'/go-', r'/redirect', r'/exit', r'/out', r'\.(jpg|jpeg|png|gif|webp|svg|ico|pdf|zip|rar|doc|docx|xls|xlsx)']):
-            return False
-        return True
-
-    def is_noindex_page(soup):
-        try:
-            meta_robots = soup.find('meta', attrs={'name': 'robots'})
-            if meta_robots and 'noindex' in meta_robots.get('content', '').lower(): return True
-            noindex_meta = soup.find('meta', attrs={'name': 'googlebot', 'content': lambda x: x and 'noindex' in x.lower()})
-            if noindex_meta: return True
-            title = soup.find('title')
-            if title and any(k in title.get_text('').lower() for k in ['外部サイト', 'リダイレクト', '移動中', '外部リンク', 'cushion']): return True
-            body_text = soup.get_text('').lower()
-            if any(p in body_text for p in ['外部サイトに移動します', 'リダイレクトしています', '外部リンクです', '別サイトに移動', 'このリンクは外部サイト']): return True
-            return False
-        except:
-            return False
-
-    def extract_links(soup, current_url):
-        nonlocal excluded_links_count
-        selectors = ['.post_content', '.entry-content', '.article-content', 'main .content', '[class*="content"]', 'main', 'article']
-        for selector in selectors:
-            areas = soup.select(selector)
-            if areas:
-                links = []
-                for area in areas:
-                    for exclude in area.select('header, footer, nav, aside, .sidebar, .widget, .share, .related, .popular-posts, .breadcrumb, .author-box, .navigation, #gnav.l-header__gnav.c-gnavWrap'):
-                        excluded_links_count += len(exclude.find_all(['a', 'div'], href=True)) + len(exclude.find_all(attrs={'onclick': True}))
-                        exclude.decompose()
-                    for link in area.find_all('a', href=True):
-                        full_url = urljoin(current_url, link['href'])
-                        links.append({'url': full_url, 'anchor_text': link.get_text(strip=True) or link.get('title', '') or '[リンク]'})
-                    for element in area.find_all(attrs={'onclick': True}):
-                        match = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", element.get('onclick', ''))
-                        if match:
-                            full_url = urljoin(current_url, match.group(1))
-                            links.append({'url': full_url, 'anchor_text': element.get_text(strip=True) or element.get('title', '') or '[onclick リンク]'})
-                if links: return links
-        
-        all_links = []
-        for link in soup.find_all('a', href=True):
-            full_url = urljoin(current_url, link['href'])
-            all_links.append({'url': full_url, 'anchor_text': link.get_text(strip=True) or link.get('title', '') or '[リンク]'})
-        for element in soup.find_all(attrs={'onclick': True}):
-            match = re.search(r"window\.location\.href\s*=\s*['\"]([^'\"]+)['\"]", element.get('onclick', ''))
-            if match:
-                full_url = urljoin(current_url, match.group(1))
-                all_links.append({'url': full_url, 'anchor_text': element.get_text(strip=True) or element.get('title', '') or '[onclick リンク]'})
-        return all_links
-
-    def is_internal(url, domain):
-        return urlparse(url).netloc.replace('www.', '') == domain.replace('www.', '')
-
-    # --- ここからが分析の実行部分です ---
-    try:
-        base_url = "https://crecaeru.co.jp"
-        domain = urlparse(base_url).netloc
-        session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-
-        to_visit = generate_seed_urls(base_url, session)
-        visited = set()
-        processed_links = set()
-        
-        unique_to_visit = []
-        seen_urls = set()
-        for url in to_visit:
-            normalized = normalize_url(url)
-            if normalized not in seen_urls:
-                seen_urls.add(normalized)
-                unique_to_visit.append(normalized)
-        to_visit = unique_to_visit
-        status_callback(f"重複除去後のシードURL数: {len(to_visit)}")
-
-        crawl_count = 0
-        while to_visit and crawl_count < 500: # 上限設定
-            url = to_visit.pop(0)
-            normalized_url = normalize_url(url)
-            if normalized_url in visited:
-                continue
-
-            try:
-                response = session.get(url, timeout=15)
-                if response.status_code != 200: continue
-                
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                if is_noindex_page(soup):
-                    visited.add(normalized_url)
-                    continue
-                
-                extracted = extract_links(soup, url)
-                
-                title = soup.title.string.strip() if soup.title and soup.title.string else normalized_url
-                title = re.sub(r'\s*[|\-]\s*.*(crecaeru|クレかえる|クレカエル).*$', '', title, flags=re.IGNORECASE)
-                
-                pages[normalized_url] = {'title': title, 'outbound_links': []}
-
-                for link_data in extracted:
-                    normalized_link = normalize_url(link_data['url'])
-                    if is_internal(normalized_link, domain) and is_content(normalized_link):
-                        if (normalized_url, normalized_link) not in processed_links:
-                            processed_links.add((normalized_url, normalized_link))
-                            links.append((normalized_url, normalized_link))
-                            pages[normalized_url]['outbound_links'].append(normalized_link)
-                            detailed_links.append({
-                                'source_url': normalized_url, 'source_title': title,
-                                'target_url': normalized_link, 'anchor_text': link_data['anchor_text']
-                            })
-                        if normalized_link not in visited and normalized_link not in to_visit:
-                            to_visit.append(normalized_link)
-
-                visited.add(normalized_url)
-                crawl_count += 1
-                status_callback(f"クロール中 ({crawl_count}/500): {normalized_url[:70]}...")
-                time.sleep(0.1)
-
-            except Exception as e:
-                status_callback(f"  - エラー発生: {url} - {e}")
-                continue
-
-        for url in pages:
-            pages[url]['inbound_links'] = sum(1 for _, tgt in links if tgt == url)
-        
-        status_callback(f"分析完了。{len(pages)}ページ、{len(links)}リンクを検出。除外リンク: {excluded_links_count}")
-
-    except Exception as e:
-        status_callback(f"致命的なエラーが発生しました: {e}")
-        return "A_番号,B_ページタイトル,C_URL,D_被リンク元ページタイトル,E_被リンク元ページURL,F_被リンク元ページアンカーテキスト\n"
-
-    # --- 最後にCSV文字列を生成して返します ---
-    # 主のオリジナルのCSV書き出しロジックを再現
+    # CSVデータ生成
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(['A_番号', 'B_ページタイトル', 'C_URL', 'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト'])
+    writer.writerow(['番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'])
+
+    sorted_targets = sorted(target_counts.items(), key=lambda x: x[1], reverse=True)
     
-    target_groups = {}
-    for link in detailed_links:
-        target_url = link['target_url']
-        if target_url not in target_groups: target_groups[target_url] = []
-        target_groups[target_url].append(link)
-    
-    sorted_targets = sorted(target_groups.items(), key=lambda x: len(x[1]), reverse=True)
-    
-    page_numbers = {}
-    current_page_number = 1
-    
+    row_num = 1
     for target_url, _ in sorted_targets:
-        target_info = pages.get(target_url, {})
-        page_key = (target_info.get('title', target_url), target_url)
-        if page_key not in page_numbers:
-            page_numbers[page_key] = current_page_number
-            current_page_number += 1
-            
-    for url, info in pages.items():
-        if info.get('inbound_links', 0) == 0:
-            page_key = (info['title'], url)
-            if page_key not in page_numbers:
-                page_numbers[page_key] = current_page_number
-                current_page_number += 1
+        target_title = pages.get(target_url, {}).get('title', target_url)
+        
+        for _, link in df_links[df_links['target_url'] == target_url].iterrows():
+            writer.writerow([row_num, target_title, target_url, link['source_title'], link['source_url'], link['anchor_text']])
+        row_num += 1
 
-    for target_url, links_to_target in sorted_targets:
-        target_info = pages.get(target_url, {})
-        target_title = target_info.get('title', target_url)
-        page_key = (target_title, target_url)
-        page_number = page_numbers.get(page_key)
-        if page_number:
-            for link in links_to_target:
-                writer.writerow([page_number, target_title, target_url, link['source_title'], link['source_url'], link['anchor_text']])
-
+    # 孤立ページ
     for url, info in pages.items():
-        if info.get('inbound_links', 0) == 0:
-            page_key = (info['title'], url)
-            page_number = page_numbers.get(page_key)
-            if page_number:
-                writer.writerow([page_number, info['title'], url, '', '', ''])
+        if url not in target_counts:
+            writer.writerow([row_num, info['title'], url, '', '', ''])
+            row_num += 1
 
     return output.getvalue()
