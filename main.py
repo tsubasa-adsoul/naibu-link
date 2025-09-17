@@ -1,4 +1,4 @@
-# main.py （最終完成版・結果保持機能 完璧版）
+# main.py （真の最終完成版・ネットワーク図機能 完全復活）
 
 import streamlit as st
 import pandas as pd
@@ -117,8 +117,6 @@ def main():
         source_options = ["CSVファイルをアップロード"]
         if site_names: source_options.insert(0, "オンラインで新規分析を実行")
         
-        # ★★★ ここが最重要修正点 ★★★
-        # 諸悪の根源であった on_change を完全に削除
         analysis_source = st.radio("データソースを選択", source_options, key="analysis_source")
         
         uploaded_file = None
@@ -127,9 +125,6 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🚀 分析開始/再開"):
-                    # 以前の分析結果をクリアしてから新しい分析を開始
-                    if 'last_analyzed_csv_data' in st.session_state:
-                        del st.session_state['last_analyzed_csv_data']
                     if st.session_state.analysis_state.get('site_name') != selected_site_name:
                         st.session_state.analysis_state = {'site_name': selected_site_name, 'phase': 'initializing'}
                     st.session_state.analysis_state['running'] = True
@@ -160,7 +155,6 @@ def main():
     if uploaded_file:
         data_source = uploaded_file
         filename_for_detect = uploaded_file.name
-        # CSVをアップロードしたら、過去のオンライン分析結果はクリアする
         if 'last_analyzed_csv_data' in st.session_state:
             del st.session_state['last_analyzed_csv_data']
     elif 'last_analyzed_csv_data' in st.session_state:
@@ -196,20 +190,55 @@ def main():
         pages_df = pages_df.sort_values('被リンク数', ascending=False).reset_index(drop=True)
 
         with tab1: st.dataframe(df)
+
         with tab2:
             st.header("🏛️ ピラーページ分析")
             st.dataframe(pages_df[['B_ページタイトル', 'C_URL', '被リンク数']], use_container_width=True)
             fig = px.bar(pages_df.head(20).sort_values('被リンク数'), x='被リンク数', y='B_ページタイトル', orientation='h', title="被リンク数 TOP20")
             st.plotly_chart(fig, use_container_width=True)
+
         with tab3:
             st.header("🧩 クラスター分析（アンカーテキスト）")
             anchor_counts = Counter(df[df['F_被リンク元ページアンカーテキスト'] != '']['F_被リンク元ページアンカーテキスト'])
-            if anchor_counts: st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
-            else: st.warning("アンカーテキストデータがありません。")
+            if anchor_counts:
+                st.dataframe(pd.DataFrame(anchor_counts.most_common(), columns=['アンカーテキスト', '頻度']), use_container_width=True)
+            else:
+                st.warning("アンカーテキストデータがありません。")
+
+        # ★★★ ここが最重要修正点：ネットワーク図機能を完全に復元 ★★★
         with tab4:
             st.header("📈 ネットワーク図")
-            # (ネットワーク図のロジックは変更なし)
-            pass
+            if not HAS_PYVIS:
+                st.error("❌ pyvisライブラリが必要です。`requirements.txt`に`pyvis`を追加してください。")
+            else:
+                with st.spinner("インタラクティブネットワーク図を生成中..."):
+                    try:
+                        edges_df = df[(df['E_被リンク元ページURL'] != "") & (df['C_URL'] != "")].copy()
+                        top_n_urls = set(pages_df.head(network_top_n)['C_URL'])
+                        sub_edges = edges_df[edges_df['C_URL'].isin(top_n_urls) & edges_df['E_被リンク元ページURL'].isin(top_n_urls)]
+                        
+                        if not sub_edges.empty:
+                            agg = sub_edges.groupby(['E_被リンク元ページURL', 'C_URL']).size().reset_index(name='weight')
+                            url_map = pd.concat([df[['C_URL', 'B_ページタイトル']].rename(columns={'C_URL':'url', 'B_ページタイトル':'title'}), df[['E_被リンク元ページURL', 'D_被リンク元ページタイトル']].rename(columns={'E_被リンク元ページURL':'url', 'D_被リンク元ページタイトル':'title'})]).drop_duplicates('url').set_index('url')['title'].to_dict()
+                            
+                            net = Network(height="800px", width="100%", directed=True, notebook=True, cdn_resources='in_line')
+                            net.set_options('{"physics":{"barnesHut":{"gravitationalConstant":-8000,"springLength":150,"avoidOverlap":0.1}}}')
+
+                            nodes_to_draw = set(agg['E_被リンク元ページURL']).union(set(agg['C_URL']))
+                            for u in nodes_to_draw:
+                                net.add_node(u, label=str(url_map.get(u, u))[:20], title=url_map.get(u, u), size=10 + math.log2(inbound_counts.get(u, 0) + 1) * 4)
+                            for _, r in agg.iterrows():
+                                net.add_edge(r['E_被リンク元ページURL'], r['C_URL'], value=r['weight'])
+                            
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmp:
+                                net.save_graph(tmp.name)
+                                with open(tmp.name, 'r', encoding='utf-8') as f:
+                                    st.components.v1.html(f.read(), height=820, scrolling=True)
+                            os.unlink(tmp.name)
+                        else:
+                            st.warning("ネットワークを描画するためのリンクデータが不足しています（上位N件内）。")
+                    except Exception as e:
+                        st.error(f"❌ ネットワーク図の生成に失敗しました: {e}")
 
     except Exception as e:
         st.error(f"❌ データ処理中にエラーが発生しました: {e}")
