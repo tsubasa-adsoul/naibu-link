@@ -49,7 +49,7 @@ SITES_CONFIG = {
         "module_name": "bicgift"
     },
     "クレかえる": {
-        "base_url": "https://kurekaeru.jp",
+        "base_url": "https://crecaeru.co.jp",
         "module_name": "crecaeru"
     },
     "ファミペイ": {
@@ -57,35 +57,35 @@ SITES_CONFIG = {
         "module_name": "flashpay_famipay"
     },
     "メディア": {
-        "base_url": "https://flashpay-media.com",
+        "base_url": "https://flashpay.jp/famipay",
         "module_name": "flashpay_media"
     },
     "フレンドペイ": {
-        "base_url": "https://friendpay.me",
+        "base_url": "https://friendpay.jp",
         "module_name": "friendpay"
     },
     "不用品回収隊": {
-        "base_url": "https://fuyouhin-kaishuu.com",
+        "base_url": "https://fuyohin-kaishu.co.jp",
         "module_name": "fuyouhin"
     },
     "買取LIFE": {
-        "base_url": "https://kaitori-life.com",
+        "base_url": "https://kaitori-life.co.jp",
         "module_name": "kaitori_life"
     },
     "カウール": {
-        "base_url": "https://kau-ru.com",
+        "base_url": "https://kau-ru.co.jp",
         "module_name": "kau_ru"
     },
     "MorePay": {
-        "base_url": "https://morepay.jp",
+        "base_url": "https://more-pay.jp/",
         "module_name": "morepay"
     },
     "ペイフル": {
-        "base_url": "https://payful.jp",
+        "base_url": "https://pay-ful.jp/",
         "module_name": "payful"
     },
     "スマートペイ": {
-        "base_url": "https://smartpay-gift.com",
+        "base_url": "https://smart-pay.website",
         "module_name": "smart"
     },
     "XGIFT": {
