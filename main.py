@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-内部リンク構造分析ツール - Streamlit版
+内部リンク構造分析ツール - Streamlit版（柔軟な列名対応）
 - ピラーページ / クラスター（アンカー） / 孤立記事を全件出力
 - ネットワーク図（静的：plotly、インタラクティブ：pyvis）
 - CSVアップロード機能
 - HTMLレポート生成・ダウンロード機能
+- 様々な列名フォーマットに対応
 """
 
 import streamlit as st
@@ -26,6 +27,7 @@ from urllib.parse import urlparse
 import base64
 from io import BytesIO
 import zipfile
+import re
 
 # PyVis（オプション）
 try:
@@ -72,8 +74,105 @@ st.markdown("""
         padding: 0.75rem;
         margin: 1rem 0;
     }
+    .column-mapping {
+        background-color: #e3f2fd;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+# 柔軟な列名マッピング関数
+def detect_column_mapping(columns):
+    """
+    CSVの列名を自動検出して標準形式にマッピング
+    """
+    mapping = {}
+    
+    # 正規化用の関数
+    def normalize_col_name(name):
+        if not isinstance(name, str):
+            return ""
+        # 小文字化、記号・空白除去
+        return re.sub(r'[^\w]', '', str(name).lower())
+    
+    # 各標準列に対する候補パターンを定義
+    patterns = {
+        'A_番号': [
+            r'^(a_)?番号$', r'^(a_)?no$', r'^(a_)?number$', r'^(a_)?id$',
+            r'^番号$', r'^no$', r'^id$'
+        ],
+        'B_ページタイトル': [
+            r'^(b_)?(ページ)?タイトル$', r'^(b_)?title$', r'^(b_)?page.*title$',
+            r'^タイトル$', r'^ページタイトル$', r'^pagetitle$'
+        ],
+        'C_URL': [
+            r'^(c_)?url$', r'^(c_)?ページurl$', r'^(c_)?page.*url$',
+            r'^url$', r'^pageurl$'
+        ],
+        'D_被リンク元ページタイトル': [
+            r'^(d_)?被リンク元.*タイトル$', r'^(d_)?被リンク元.*title$', 
+            r'^(d_)?リンク元.*タイトル$', r'^(d_)?source.*title$',
+            r'^被リンク元タイトル$', r'^リンク元タイトル$', r'^sourcetitle$'
+        ],
+        'E_被リンク元ページURL': [
+            r'^(e_)?被リンク元.*url$', r'^(e_)?リンク元.*url$', 
+            r'^(e_)?source.*url$', r'^(e_)?from.*url$',
+            r'^被リンク元url$', r'^リンク元url$', r'^sourceurl$'
+        ],
+        'F_被リンク元ページアンカーテキスト': [
+            r'^(f_)?.*アンカー.*テキスト$', r'^(f_)?.*anchor.*text$',
+            r'^(f_)?アンカー$', r'^(f_)?anchor$',
+            r'^アンカーテキスト$', r'^anchortext$'
+        ]
+    }
+    
+    # 各列について最適なマッピングを探す
+    used_columns = set()
+    
+    for standard_col, pattern_list in patterns.items():
+        best_match = None
+        best_score = 0
+        
+        for col in columns:
+            if col in used_columns:
+                continue
+                
+            normalized_col = normalize_col_name(col)
+            
+            for pattern in pattern_list:
+                if re.match(pattern, normalized_col):
+                    # より具体的なパターンほど高スコア
+                    score = len(pattern) + (10 if 'リンク元' in col or 'source' in normalized_col else 0)
+                    if score > best_score:
+                        best_match = col
+                        best_score = score
+        
+        if best_match:
+            mapping[best_match] = standard_col
+            used_columns.add(best_match)
+    
+    return mapping
+
+def apply_column_mapping(df, mapping):
+    """
+    列名マッピングを適用してデータフレームの列名を統一
+    """
+    # マッピングを適用
+    df_mapped = df.rename(columns=mapping)
+    
+    # 不足している列を空列として追加
+    standard_columns = [
+        'A_番号', 'B_ページタイトル', 'C_URL',
+        'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト'
+    ]
+    
+    for col in standard_columns:
+        if col not in df_mapped.columns:
+            df_mapped[col] = ""
+    
+    return df_mapped[standard_columns]
 
 # ユーティリティ関数
 @st.cache_data
@@ -120,6 +219,8 @@ def detect_site_info(filename, df):
         site_name = "フレンドペイ"
     elif 'kurekaeru' in filename or 'crecaeru' in filename:
         site_name = "クレかえる"
+    elif 'answergenkinka' in filename:
+        site_name = "アンサー現金化"
     else:
         site_name = "Unknown Site"
     
@@ -240,26 +341,40 @@ def main():
     if uploaded_file is None:
         st.info("👆 サイドバーからCSVファイルをアップロードしてください")
         
-        # 期待されるCSVフォーマットを表示
-        st.subheader("📋 期待されるCSVフォーマット")
-        expected_columns = [
-            'A_番号',
-            'B_ページタイトル', 
-            'C_URL',
-            'D_被リンク元ページタイトル',
-            'E_被リンク元ページURL',
-            'F_被リンク元ページアンカーテキスト'
-        ]
+        # 対応可能なCSVフォーマットを表示
+        st.subheader("📋 対応可能なCSVフォーマット")
         
+        st.markdown("""
+        このツールは以下のような列名パターンに自動対応します：
+        
+        **番号列**: `番号`, `No`, `ID`, `A_番号` など
+        
+        **ページタイトル列**: `ページタイトル`, `タイトル`, `Title`, `B_ページタイトル` など
+        
+        **URL列**: `URL`, `ページURL`, `C_URL` など
+        
+        **被リンク元タイトル列**: `被リンク元タイトル`, `リンク元タイトル`, `D_被リンク元ページタイトル` など
+        
+        **被リンク元URL列**: `被リンク元URL`, `リンク元URL`, `E_被リンク元ページURL` など
+        
+        **アンカーテキスト列**: `アンカーテキスト`, `アンカー`, `F_被リンク元ページアンカーテキスト` など
+        """)
+        
+        # サンプルデータ例
         sample_data = pd.DataFrame({
-            'カラム名': expected_columns,
+            '列の種類': [
+                '番号', 'ページタイトル', 'URL', '被リンク元タイトル', '被リンク元URL', 'アンカーテキスト'
+            ],
             '説明': [
-                '連番',
+                '連番（オプション）',
                 'ターゲットページのタイトル',
                 'ターゲットページのURL',
                 'リンク元ページのタイトル',
                 'リンク元ページのURL',
                 'アンカーテキスト'
+            ],
+            '必須': [
+                '任意', '必須', '必須', '任意', '任意', '任意'
             ]
         })
         st.dataframe(sample_data, use_container_width=True)
@@ -267,18 +382,53 @@ def main():
     
     # データ読み込み
     try:
-        df = pd.read_csv(uploaded_file, encoding="utf-8-sig").fillna("")
+        # CSVを読み込み
+        df_raw = pd.read_csv(uploaded_file, encoding="utf-8-sig").fillna("")
         
-        # 必要な列の存在確認
-        expected_columns = [
-            'A_番号', 'B_ページタイトル', 'C_URL',
-            'D_被リンク元ページタイトル', 'E_被リンク元ページURL', 'F_被リンク元ページアンカーテキスト'
-        ]
+        st.subheader("📊 データ読み込み結果")
         
-        missing_columns = [col for col in expected_columns if col not in df.columns]
-        if missing_columns:
-            st.error(f"❌ 必要な列が不足しています: {missing_columns}")
-            st.write("実際の列:", list(df.columns))
+        # 元の列名を表示
+        st.write("**元のCSVの列名:**")
+        st.write(list(df_raw.columns))
+        
+        # 列名マッピングを自動検出
+        column_mapping = detect_column_mapping(df_raw.columns)
+        
+        if not column_mapping:
+            st.error("❌ 適切な列名が見つかりませんでした。CSVファイルの列名を確認してください。")
+            st.write("**検出された列名:**", list(df_raw.columns))
+            st.write("**期待される列の種類:**")
+            expected_types = [
+                "番号・ID系", "ページタイトル系", "URL系", 
+                "被リンク元タイトル系", "被リンク元URL系", "アンカーテキスト系"
+            ]
+            st.write(expected_types)
+            return
+        
+        # マッピング結果を表示
+        st.markdown('<div class="column-mapping">', unsafe_allow_html=True)
+        st.write("**🔄 自動検出された列名マッピング:**")
+        mapping_df = pd.DataFrame([
+            {"元の列名": orig, "標準列名": mapped}
+            for orig, mapped in column_mapping.items()
+        ])
+        st.dataframe(mapping_df, use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # マッピングを適用
+        df = apply_column_mapping(df_raw, column_mapping)
+        
+        # 必須列の確認
+        essential_columns = ['B_ページタイトル', 'C_URL']
+        missing_essential = []
+        
+        for col in essential_columns:
+            if col not in df.columns or df[col].fillna("").astype(str).str.strip().eq("").all():
+                missing_essential.append(col)
+        
+        if missing_essential:
+            st.error(f"❌ 必須データが不足しています: {missing_essential}")
+            st.write("少なくとも「ページタイトル」と「URL」の情報が必要です。")
             return
         
         # サイト情報検出
@@ -345,38 +495,41 @@ def main():
             # 上位ページ表示
             top_pages = pages_df.head(top_n_pillar)
             
-            # グラフ表示
-            fig = px.bar(
-                top_pages.head(15), 
-                x='被リンク数', 
-                y='B_ページタイトル',
-                orientation='h',
-                title="被リンク数 TOP15",
-                labels={'被リンク数': '被リンク数', 'B_ページタイトル': 'ページタイトル'}
-            )
-            fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=600)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # データテーブル表示
-            st.subheader("📋 ピラーページ一覧")
-            display_df = top_pages[['B_ページタイトル', 'C_URL', '被リンク数']].copy()
-            display_df.index = range(1, len(display_df) + 1)
-            st.dataframe(display_df, use_container_width=True)
-            
-            # HTMLレポート生成
-            if auto_download and st.button("📥 ピラーページレポートをダウンロード", key="download_pillar"):
-                rows = [[i, safe_str(row['B_ページタイトル']), safe_str(row['C_URL']), int(row['被リンク数'])]
-                        for i, (_, row) in enumerate(pages_df.iterrows(), 1)]
-                
-                html_content = generate_html_table(
-                    f"{site_name} ピラーページ分析レポート",
-                    ["#", "ページタイトル", "URL", "被リンク数"],
-                    rows
+            if not top_pages.empty:
+                # グラフ表示
+                fig = px.bar(
+                    top_pages.head(15), 
+                    x='被リンク数', 
+                    y='B_ページタイトル',
+                    orientation='h',
+                    title="被リンク数 TOP15",
+                    labels={'被リンク数': '被リンク数', 'B_ページタイトル': 'ページタイトル'}
                 )
+                fig.update_layout(yaxis={'categoryorder':'total ascending'}, height=600)
+                st.plotly_chart(fig, use_container_width=True)
                 
-                filename = f"pillar_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-                download_link = create_download_link(html_content, filename)
-                st.markdown(download_link, unsafe_allow_html=True)
+                # データテーブル表示
+                st.subheader("📋 ピラーページ一覧")
+                display_df = top_pages[['B_ページタイトル', 'C_URL', '被リンク数']].copy()
+                display_df.index = range(1, len(display_df) + 1)
+                st.dataframe(display_df, use_container_width=True)
+                
+                # HTMLレポート生成
+                if auto_download and st.button("📥 ピラーページレポートをダウンロード", key="download_pillar"):
+                    rows = [[i, safe_str(row['B_ページタイトル']), safe_str(row['C_URL']), int(row['被リンク数'])]
+                            for i, (_, row) in enumerate(pages_df.iterrows(), 1)]
+                    
+                    html_content = generate_html_table(
+                        f"{site_name} ピラーページ分析レポート",
+                        ["#", "ページタイトル", "URL", "被リンク数"],
+                        rows
+                    )
+                    
+                    filename = f"pillar_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                    download_link = create_download_link(html_content, filename)
+                    st.markdown(download_link, unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ 分析対象のページデータが見つかりません。")
         
         # Tab 2: クラスター分析
         with tab2:
@@ -489,20 +642,23 @@ def main():
                 # 簡易散布図
                 top_pages_network = pages_df.head(network_top_n)
                 
-                fig = px.scatter(
-                    top_pages_network,
-                    x=range(len(top_pages_network)),
-                    y='被リンク数',
-                    size='被リンク数',
-                    hover_data=['B_ページタイトル', 'C_URL'],
-                    title=f"被リンク数分布（上位{network_top_n}件）"
-                )
-                fig.update_layout(
-                    xaxis_title="ページ順位",
-                    yaxis_title="被リンク数",
-                    height=600
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                if not top_pages_network.empty:
+                    fig = px.scatter(
+                        top_pages_network,
+                        x=range(len(top_pages_network)),
+                        y='被リンク数',
+                        size='被リンク数',
+                        hover_data=['B_ページタイトル', 'C_URL'],
+                        title=f"被リンク数分布（上位{network_top_n}件）"
+                    )
+                    fig.update_layout(
+                        xaxis_title="ページ順位",
+                        yaxis_title="被リンク数",
+                        height=600
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("⚠️ 表示できるデータがありません。")
             
             elif network_type == "ネットワーク図（中重量）":
                 # Plotlyネットワーク図
@@ -597,7 +753,6 @@ def main():
                 else:
                     st.info("🔄 インタラクティブネットワーク図を生成中...")
                     
-                    # 元のローカル版のコードをそのまま採用
                     try:
                         edges_df = df[
                             (df['E_被リンク元ページURL'].astype(str) != "") &
@@ -750,14 +905,17 @@ def main():
             with col2:
                 st.markdown("### 📊 被リンク数分布")
                 # ヒストグラム
-                fig = px.histogram(
-                    pages_df,
-                    x='被リンク数',
-                    nbins=20,
-                    title="被リンク数の分布"
-                )
-                fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                if pages_df['被リンク数'].max() > 0:
+                    fig = px.histogram(
+                        pages_df,
+                        x='被リンク数',
+                        nbins=20,
+                        title="被リンク数の分布"
+                    )
+                    fig.update_layout(height=400)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("被リンクデータがないため、分布グラフは表示されません。")
             
             # 上位/下位ページ
             st.subheader("🏆 トップ＆ボトム")
@@ -767,14 +925,21 @@ def main():
             with col1:
                 st.markdown("#### 🥇 被リンク数 TOP10")
                 top10 = pages_df.head(10)[['B_ページタイトル', '被リンク数']]
-                top10.index = range(1, 11)
-                st.dataframe(top10, use_container_width=True)
+                if not top10.empty:
+                    top10.index = range(1, len(top10) + 1)
+                    st.dataframe(top10, use_container_width=True)
+                else:
+                    st.info("データがありません。")
             
             with col2:
                 st.markdown("#### 🥉 被リンク数 BOTTOM10")
-                bottom10 = pages_df[pages_df['被リンク数'] > 0].tail(10)[['B_ページタイトル', '被リンク数']]
-                bottom10.index = range(1, len(bottom10) + 1)
-                st.dataframe(bottom10, use_container_width=True)
+                bottom_candidates = pages_df[pages_df['被リンク数'] > 0]
+                if not bottom_candidates.empty:
+                    bottom10 = bottom_candidates.tail(10)[['B_ページタイトル', '被リンク数']]
+                    bottom10.index = range(1, len(bottom10) + 1)
+                    st.dataframe(bottom10, use_container_width=True)
+                else:
+                    st.info("被リンクを受けているページがありません。")
             
             # アンカーテキスト分析
             if anchor_counts:
@@ -817,18 +982,24 @@ def main():
             
             # 孤立ページが多い
             isolated_count = len(pages_df[pages_df['被リンク数'] == 0])
-            isolated_ratio = isolated_count / len(pages_df)
+            isolated_ratio = isolated_count / len(pages_df) if len(pages_df) > 0 else 0
             if isolated_ratio > 0.3:
                 issues.append(f"🏝️ 孤立ページが多すぎます（{isolated_count}件, {isolated_ratio:.1%}）")
             
             # 被リンクが極端に偏っている
-            top1_ratio = pages_df.iloc[0]['被リンク数'] / pages_df['被リンク数'].sum() if pages_df['被リンク数'].sum() > 0 else 0
-            if top1_ratio > 0.5:
-                issues.append(f"🎯 被リンクが1ページに集中しすぎています（{top1_ratio:.1%}）")
+            total_inbound = pages_df['被リンク数'].sum()
+            if total_inbound > 0:
+                top1_ratio = pages_df.iloc[0]['被リンク数'] / total_inbound
+                if top1_ratio > 0.5:
+                    issues.append(f"🎯 被リンクが1ページに集中しすぎています（{top1_ratio:.1%}）")
             
             # アンカーテキストの多様性が低い
-            if anchor_counts and diversity_index < 0.3:
-                issues.append(f"🏷️ アンカーテキストの多様性が低いです（{diversity_index:.3f}）")
+            if anchor_counts:
+                total_anchors = sum(anchor_counts.values())
+                hhi = sum((count/total_anchors)**2 for count in anchor_counts.values())
+                diversity_index = 1 - hhi
+                if diversity_index < 0.3:
+                    issues.append(f"🏷️ アンカーテキストの多様性が低いです（{diversity_index:.3f}）")
             
             if issues:
                 for issue in issues:
@@ -844,11 +1015,18 @@ def main():
             if isolated_count > 0:
                 recommendations.append("🔗 孤立ページに内部リンクを追加してください")
             
-            if top1_ratio > 0.3:
-                recommendations.append("⚖️ 内部リンクをより均等に分散させてください")
+            total_inbound = pages_df['被リンク数'].sum()
+            if total_inbound > 0:
+                top1_ratio = pages_df.iloc[0]['被リンク数'] / total_inbound
+                if top1_ratio > 0.3:
+                    recommendations.append("⚖️ 内部リンクをより均等に分散させてください")
             
-            if anchor_counts and diversity_index < 0.5:
-                recommendations.append("🏷️ アンカーテキストのバリエーションを増やしてください")
+            if anchor_counts:
+                total_anchors = sum(anchor_counts.values())
+                hhi = sum((count/total_anchors)**2 for count in anchor_counts.values())
+                diversity_index = 1 - hhi
+                if diversity_index < 0.5:
+                    recommendations.append("🏷️ アンカーテキストのバリエーションを増やしてください")
             
             if len(pages_df) > 100 and pages_df['被リンク数'].mean() < 2:
                 recommendations.append("📈 全体的な内部リンク密度を高めてください")
