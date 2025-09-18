@@ -174,6 +174,20 @@ def analyze_step(state):
         sitemap_root = urljoin(base_url, '/sitemap.xml')
         sitemap_urls = extract_from_sitemap(sitemap_root)
         log(f"サイトマップから {len(sitemap_urls)} 個のURLを取得")
+        
+        # サイトマップが空の場合、手動でURLを追加
+        if len(sitemap_urls) == 0:
+            log("サイトマップが空のため、手動でURLを追加します")
+            manual_urls = [
+                "https://crecaeru.co.jp/",
+                "https://crecaeru.co.jp/arigataya/",
+                "https://crecaeru.co.jp/more-pay/",
+                "https://crecaeru.co.jp/pay-ful/",
+                "https://crecaeru.co.jp/category/sakibarai-kaitori/",
+                "https://crecaeru.co.jp/yarikuri/"
+            ]
+            return manual_urls
+        
         return list(set([normalize_url(base_url)] + sitemap_urls))
 
     def is_internal(url, domain):
@@ -190,7 +204,7 @@ def analyze_step(state):
             visited = set()
             to_visit = generate_seed_urls(base_url)
             domain = urlparse(base_url).netloc
-            processed_links = set()  # 重複除去用
+            processed_links_list = []  # set()の代わりにlistで管理
 
             session = requests.Session()
             session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
@@ -211,8 +225,9 @@ def analyze_step(state):
             
             state.update({
                 'session': session, 'base_url': base_url, 'domain': domain,
-                'to_visit': to_visit, 'visited': visited, 'pages': pages, 
-                'links': links, 'detailed_links': detailed_links, 'processed_links': processed_links,
+                'to_visit': to_visit, 'visited': list(visited), 'pages': pages, 
+                'links': links, 'detailed_links': detailed_links, 
+                'processed_links_list': processed_links_list,  # listとして保存
                 'phase': 'crawling'
             })
             
@@ -222,18 +237,25 @@ def analyze_step(state):
         return state
 
     if state['phase'] == 'crawling':
-        # ローカル版のクロールロジックを完全コピー
+        # ステートから値を取得
         session = state['session']
         base_url = state['base_url']
         domain = state['domain']
         to_visit = state['to_visit']
-        visited = state['visited']
+        visited = set(state.get('visited', []))  # listからsetに変換
         pages = state['pages']
         links = state['links']
         detailed_links = state['detailed_links']
-        processed_links = state['processed_links']
+        processed_links_list = state.get('processed_links_list', [])
+        
+        # 処理済みリンクをsetに変換（高速化のため）
+        processed_links = set()
+        for link_pair in processed_links_list:
+            if isinstance(link_pair, (list, tuple)) and len(link_pair) == 2:
+                processed_links.add(tuple(link_pair))
         
         crawled_count = 0
+        new_processed_links = []  # 新規追加分を記録
         
         while to_visit and len(pages) < 500 and crawled_count < 10:
             url = to_visit.pop(0)
@@ -269,9 +291,15 @@ def analyze_step(state):
                 }
 
                 # このページからの内部リンクを記録
+                link_count_for_this_page = 0
                 for link_data in extracted_links:
                     link_url = link_data['url']
                     anchor_text = link_data['anchor_text']
+                    
+                    # 相対URLを絶対URLに変換
+                    if not link_url.startswith(('http://', 'https://')):
+                        link_url = urljoin(normalized_url, link_url)
+                    
                     normalized_link = normalize_url(link_url)
                     
                     if (is_internal(normalized_link, domain) and 
@@ -281,6 +309,7 @@ def analyze_step(state):
                         link_key = (normalized_url, normalized_link)
                         if link_key not in processed_links:
                             processed_links.add(link_key)
+                            new_processed_links.append(list(link_key))  # listとして保存
                             
                             links.append((normalized_url, normalized_link))
                             pages[normalized_url]['outbound_links'].append(normalized_link)
@@ -292,6 +321,7 @@ def analyze_step(state):
                                 'target_url': normalized_link,
                                 'anchor_text': anchor_text
                             })
+                            link_count_for_this_page += 1
                         
                         # 新規URLの発見
                         if (normalized_link not in visited and 
@@ -300,7 +330,7 @@ def analyze_step(state):
 
                 visited.add(normalized_url)
                 crawled_count += 1
-                log(f"{len(pages)}件目: {normalized_url[:60]}...")
+                log(f"{len(pages)}件目: {title[:30]}... ({link_count_for_this_page}個のリンクを抽出)")
 
                 time.sleep(0.1)
 
@@ -312,18 +342,26 @@ def analyze_step(state):
         for url in pages:
             pages[url]['inbound_links'] = sum(1 for _, tgt in links if tgt == url)
 
+        # 処理済みリンクリストを更新
+        processed_links_list.extend(new_processed_links)
+        
         # state更新
         state.update({
-            'pages': pages, 'links': links, 'detailed_links': detailed_links,
-            'to_visit': to_visit, 'visited': visited, 'processed_links': processed_links
+            'pages': pages, 
+            'links': links, 
+            'detailed_links': detailed_links,
+            'to_visit': to_visit, 
+            'visited': list(visited),  # setからlistに変換して保存
+            'processed_links_list': processed_links_list,  # listとして保存
+            'phase': 'crawling' if to_visit else 'completed'
         })
 
         total_urls = len(visited) + len(to_visit)
         state['progress'] = len(visited) / total_urls if total_urls > 0 else 1
         state['progress_text'] = f"進捗: {len(visited)} / {total_urls} ページ"
 
-        if not to_visit:
-            log("クロール完了。")
+        if not to_visit or len(pages) >= 500:
+            log(f"クロール完了。総ページ数: {len(pages)}, 総リンク数: {len(links)}")
             state['phase'] = 'completed'
         
         return state
